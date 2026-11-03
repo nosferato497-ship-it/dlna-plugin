@@ -1,4 +1,4 @@
-/* Lampa DLNA Bridge — Standalone Probe 0.3.0
+/* Lampa DLNA Bridge — Standalone Probe 0.3.1
  * ES5-compatible diagnostic scaffold. No APK, PC, NAS or external bridge required.
  * This build deliberately does NOT claim SSDP discovery or SOAP control until the
  * AndroidJS/network capabilities and CORS behaviour are verified on the target box.
@@ -6,8 +6,8 @@
 (function () {
     'use strict';
 
-    if (window.lampa_dlna_bridge_030) return;
-    window.lampa_dlna_bridge_030 = true;
+    if (window.lampa_dlna_bridge_031) return;
+    window.lampa_dlna_bridge_031 = true;
 
     var COMPONENT = 'dlna_bridge';
     var PREFIX = 'dlna_bridge_';
@@ -51,7 +51,7 @@
     function showDiagnostics() {
         var r = inspectRuntime();
         var lines = [
-            'Lampa DLNA Bridge 0.3.0',
+            'Lampa DLNA Bridge 0.3.1',
             'AndroidJS: ' + (r.androidJS ? 'есть' : 'нет'),
             'AndroidJS.getLampaURL: ' + (r.androidGetLampaURL ? 'есть' : 'нет'),
             'Fetch: ' + (r.fetch ? 'есть' : 'нет'),
@@ -121,7 +121,7 @@
 
         Lampa.SettingsApi.addParam({
             component: COMPONENT,
-            param: { name: PREFIX + 'description_url', type: 'input', default: '', placeholder: 'http://192.168.1.10:1400/device.xml' },
+            param: { name: PREFIX + 'description_url', type: 'input', values: '', default: '', placeholder: 'http://192.168.1.10:1400/device.xml' },
             field: { name: Lampa.Lang.translate('dlna_bridge_url'), description: Lampa.Lang.translate('dlna_bridge_info') }
         });
 
