@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.6 — Android bridge diagnostics
+
+- Added a Lampa settings action to inspect only the known Android bridge globals.
+- Report property and method types plus bounded prototype information without invoking bridge methods or reading accessor properties.
+- Added bounded diagnostics with exception handling; no network or UDP probes are performed.
+
 ## 0.5.5 — Restore DLNA settings focus after playback
 
 - Restore the controller that opened the Select after folder selection and Back, so folder navigation keeps its Lampa context.
