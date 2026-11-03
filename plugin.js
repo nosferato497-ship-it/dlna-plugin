@@ -6,8 +6,16 @@
     'use strict';
 
     var GUARD = 'lampa_dlna_bridge_056';
-    if (window[GUARD]) return;
-    window[GUARD] = true;
+    var initialGuard = window[GUARD];
+    var guardState = initialGuard && typeof initialGuard === 'object' ? initialGuard : {};
+    if (guardState && (guardState.initialized || guardState.initializing)) return;
+    window[GUARD] = guardState;
+    if (initialGuard === true) {
+        if (!guardState.registrations) guardState.registrations = {};
+        // The previous boolean guard cannot reveal whether this listener ran.
+        guardState.registrations.playerCloseListener = 'uncertain';
+        guardState.migratedFromBooleanGuard = true;
+    }
 
     var COMPONENT = 'dlna_bridge';
     var PREFIX = 'dlna_bridge_';
@@ -18,7 +26,6 @@
     var cache = {};
     var currentRequest = null;
     var activeMenuClose = null;
-    var playerCloseBound = false;
     var playerReturnController = null;
     var keypadBackHandlerAttached = false;
     var keypadBackHandlerActive = false;
@@ -111,6 +118,153 @@
         if (typeof error === 'string') return error;
         if (error.message) return error.message;
         try { return JSON.stringify(error); } catch (e) { return String(error); }
+    }
+
+    function registrationState(name) {
+        if (!guardState.registrations) guardState.registrations = {};
+        return guardState.registrations[name] || 'pending';
+    }
+
+    function setRegistrationState(name, state) {
+        if (!guardState.registrations) guardState.registrations = {};
+        guardState.registrations[name] = state;
+    }
+
+    function logRegistrationError(message, error) {
+        var detail = message;
+        if (error !== undefined) detail += ': ' + errorText(error);
+        try {
+            if (!guardState.registrationErrors) guardState.registrationErrors = [];
+            if (guardState.registrationErrors.length < 50) guardState.registrationErrors.push(detail);
+        } catch (stateError) {}
+        try {
+            if (window.console && typeof window.console.error === 'function') {
+                window.console.error('[DLNA Bridge] ' + detail);
+            } else if (window.console && typeof window.console.log === 'function') {
+                window.console.log('[DLNA Bridge] ' + detail);
+            }
+        } catch (logError) {}
+    }
+
+    function componentIsPresent() {
+        try {
+            if (!Lampa.SettingsApi || typeof Lampa.SettingsApi.getComponent !== 'function') return null;
+            return !!Lampa.SettingsApi.getComponent(COMPONENT);
+        } catch (e) { return null; }
+    }
+
+    function paramIsPresent(name) {
+        try {
+            if (!Lampa.SettingsApi || typeof Lampa.SettingsApi.getParam !== 'function') return null;
+            var params = Lampa.SettingsApi.getParam(COMPONENT);
+            if (!params || typeof params.length !== 'number') return false;
+            for (var i = 0; i < params.length; i++) {
+                if (params[i] && params[i].param && params[i].param.name === name) return true;
+            }
+            return false;
+        } catch (e) { return null; }
+    }
+
+    function registerComponent() {
+        var name = 'component';
+        var state = registrationState(name);
+        if (state === 'registered') return true;
+        var present = componentIsPresent();
+        if (state === 'pending' && present === true) {
+            // Avoid adding a component already registered by an earlier script.
+            setRegistrationState(name, 'registered');
+            return true;
+        }
+        if (state === 'uncertain' && present !== false) return false;
+        try {
+            Lampa.SettingsApi.addComponent({
+                component: COMPONENT,
+                name: 'DLNA Bridge 0.5.6',
+                icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
+            });
+            setRegistrationState(name, 'registered');
+            return true;
+        } catch (error) {
+            logRegistrationError('Ошибка регистрации компонента DLNA', error);
+            present = componentIsPresent();
+            setRegistrationState(name, present === false ? 'pending' : 'uncertain');
+            return false;
+        }
+    }
+
+    function registerParam(name, data) {
+        var state = registrationState(name);
+        if (state === 'registered') return true;
+
+        var settingName = data.param.name;
+        var present = paramIsPresent(settingName);
+        if (state === 'uncertain') {
+            if (present !== false) return false;
+            setRegistrationState(name, 'pending');
+        } else if (present === true) {
+            // The parameter record exists, but Lampa may have thrown before
+            // initializing Params.values/defaults. Do not treat it as complete.
+            setRegistrationState(name, 'uncertain');
+            logRegistrationError('Параметр ' + settingName + ' присутствует, но его инициализация не подтверждена');
+            return false;
+        }
+
+        try {
+            Lampa.SettingsApi.addParam(data);
+            setRegistrationState(name, 'registered');
+            return true;
+        } catch (error) {
+            logRegistrationError('Ошибка регистрации параметра ' + settingName, error);
+            present = paramIsPresent(settingName);
+            setRegistrationState(name, present === false ? 'pending' : 'uncertain');
+            return false;
+        }
+    }
+
+    function addTranslations() {
+        var name = 'translations';
+        if (registrationState(name) !== 'pending') return;
+        if (!Lampa.Lang || typeof Lampa.Lang.add !== 'function') {
+            setRegistrationState(name, 'pending');
+            if (!guardState.langAddWarning) {
+                guardState.langAddWarning = true;
+                logRegistrationError('Lampa.Lang.add недоступен; будут использованы подписи по умолчанию');
+            }
+            return;
+        }
+        try {
+            Lampa.Lang.add({
+                dlna_bridge_title: { ru: 'DLNA Bridge 0.5.6', en: 'DLNA Bridge 0.5.6' },
+                dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
+                dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
+                dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
+                dlna_bridge_androidjs: { ru: 'Проверить AndroidJS', en: 'Inspect AndroidJS' },
+                dlna_bridge_about: { ru: 'MiniDLNA: SOAP Browse через Lampa.Reguest.native. SSDP discovery пока не реализован.', en: 'MiniDLNA SOAP Browse via Lampa.Reguest.native. SSDP discovery is not implemented yet.' }
+            });
+            setRegistrationState(name, 'registered');
+        } catch (error) {
+            setRegistrationState(name, 'uncertain');
+            logRegistrationError('Ошибка добавления переводов DLNA; будут использованы подписи по умолчанию', error);
+        }
+    }
+
+    function translated(key, fallback) {
+        try {
+            if (Lampa.Lang && typeof Lampa.Lang.translate === 'function') {
+                var value = Lampa.Lang.translate(key);
+                if (value !== undefined && value !== null && value !== '' &&
+                    (registrationState('translations') === 'registered' || value !== key)) return value;
+            } else if (!guardState.langTranslateWarning) {
+                guardState.langTranslateWarning = true;
+                logRegistrationError('Lampa.Lang.translate недоступен; используются подписи по умолчанию');
+            }
+        } catch (error) {
+            if (!guardState.langTranslateWarning) {
+                guardState.langTranslateWarning = true;
+                logRegistrationError('Ошибка Lampa.Lang.translate; используются подписи по умолчанию', error);
+            }
+        }
+        return fallback;
     }
 
     function notify(message, style) {
@@ -692,11 +846,14 @@
         showFolder('0', 'DLNA — ' + baseUrl(), []);
     }
 
-    function init() {
-        if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) return;
-        if (!playerCloseBound && Lampa.Player && Lampa.Player.listener && Lampa.Player.listener.follow) {
-            playerCloseBound = true;
-            Lampa.Player.listener.follow('close', function () {
+    function registerPlayerCloseListener(retryAfterConfirmedMissing) {
+        retryAfterConfirmedMissing = !!retryAfterConfirmedMissing;
+        var name = 'playerCloseListener';
+        var state = registrationState(name);
+        var listener = Lampa.Player && Lampa.Player.listener;
+        var handler = guardState.playerCloseHandler;
+        if (typeof handler !== 'function') {
+            handler = function () {
                 if (activeMenuClose) activeMenuClose();
                 var staleMenu = document.getElementById('dlna-bridge-menu');
                 if (staleMenu && staleMenu.parentNode) staleMenu.parentNode.removeChild(staleMenu);
@@ -709,50 +866,122 @@
                         } catch (controllerError) {}
                     }
                 }
-            });
+            };
+            guardState.playerCloseHandler = handler;
         }
-        Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.5.6', en: 'DLNA Bridge 0.5.6' },
-            dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
-            dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
-            dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
-            dlna_bridge_androidjs: { ru: 'Проверить AndroidJS', en: 'Inspect AndroidJS' },
-            dlna_bridge_about: { ru: 'MiniDLNA: SOAP Browse через Lampa.Reguest.native. SSDP discovery пока не реализован.', en: 'MiniDLNA SOAP Browse via Lampa.Reguest.native. SSDP discovery is not implemented yet.' }
-        });
-        Lampa.SettingsApi.addComponent({
-            component: COMPONENT,
-            name: 'DLNA Bridge 0.5.5',
-            icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
-        });
-        Lampa.SettingsApi.addParam({
-            component: COMPONENT,
-            param: { name: PREFIX + 'server_url', type: 'input', values: '', default: DEFAULT_BASE, placeholder: DEFAULT_BASE },
-            field: { name: Lampa.Lang.translate('dlna_bridge_server'), description: Lampa.Lang.translate('dlna_bridge_about') }
-        });
-        Lampa.SettingsApi.addParam({
-            component: COMPONENT,
-            param: { name: PREFIX + 'open_catalog', type: 'trigger', default: false },
-            field: { name: Lampa.Lang.translate('dlna_bridge_open') },
-            onChange: function () { openCatalog(); }
-        });
-        Lampa.SettingsApi.addParam({
-            component: COMPONENT,
-            param: { name: PREFIX + 'clear_cache', type: 'trigger', default: false },
-            field: { name: Lampa.Lang.translate('dlna_bridge_clear') },
-            onChange: function () { cache = {}; notify('Кеш каталога очищен.', 'success'); }
-        });
-        Lampa.SettingsApi.addParam({
-            component: COMPONENT,
-            param: { name: PREFIX + 'androidjs_diag', type: 'trigger', default: false },
-            field: { name: Lampa.Lang.translate('dlna_bridge_androidjs') },
-            onChange: function () { diagnoseAndroidBridges(); }
-        });
+        if (!listener || typeof listener.follow !== 'function') return;
+        if (state === 'registered') return;
+        if (state === 'uncertain') {
+            if (guardState.migratedFromBooleanGuard) return;
+            if (typeof listener.has !== 'function') return;
+            try {
+                if (listener.has('close', handler)) {
+                    setRegistrationState(name, 'registered');
+                    return;
+                }
+                setRegistrationState(name, 'pending');
+            } catch (hasError) {
+                return;
+            }
+        }
+        setRegistrationState(name, 'uncertain');
+        try {
+            listener.follow('close', handler);
+            setRegistrationState(name, 'registered');
+        } catch (error) {
+            logRegistrationError('Подписка Player.close завершилась исключением; проверяю её состояние', error);
+            if (typeof listener.has === 'function') {
+                try {
+                    if (listener.has('close', handler)) {
+                        setRegistrationState(name, 'registered');
+                        return;
+                    }
+                    setRegistrationState(name, 'pending');
+                    if (!retryAfterConfirmedMissing) registerPlayerCloseListener(true);
+                    return;
+                } catch (hasError) {}
+            }
+            setRegistrationState(name, 'uncertain');
+        }
+    }
+
+    function init() {
+        if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) {
+            guardState.loading = false;
+            return;
+        }
+        if (guardState.initialized || guardState.initializing) return;
+        guardState.loading = true;
+        guardState.initializing = true;
+
+        try {
+            registerPlayerCloseListener();
+            addTranslations();
+
+            registerComponent();
+            registerParam('serverUrlParam', {
+                component: COMPONENT,
+                param: { name: PREFIX + 'server_url', type: 'input', values: '', default: DEFAULT_BASE, placeholder: DEFAULT_BASE },
+                field: {
+                    name: translated('dlna_bridge_server', 'Адрес DLNA-сервера'),
+                    description: translated('dlna_bridge_about', 'SOAP Browse через Lampa.Reguest.native.')
+                }
+            });
+            registerParam('openCatalogParam', {
+                component: COMPONENT,
+                param: { name: PREFIX + 'open_catalog', type: 'trigger', default: false },
+                field: { name: translated('dlna_bridge_open', 'Открыть каталог DLNA') },
+                onChange: function () { openCatalog(); }
+            });
+            registerParam('clearCacheParam', {
+                component: COMPONENT,
+                param: { name: PREFIX + 'clear_cache', type: 'trigger', default: false },
+                field: { name: translated('dlna_bridge_clear', 'Очистить кеш каталога') },
+                onChange: function () { cache = {}; notify('Кеш каталога очищен.', 'success'); }
+            });
+
+            registerParam('androidDiagnosticParam', {
+                component: COMPONENT,
+                param: { name: PREFIX + 'androidjs_diag', type: 'trigger', default: false },
+                field: { name: translated('dlna_bridge_androidjs', 'Проверить AndroidJS') },
+                onChange: function () { diagnoseAndroidBridges(); }
+            });
+
+            var required = ['component', 'serverUrlParam', 'openCatalogParam', 'clearCacheParam'];
+            var ready = true;
+            for (var i = 0; i < required.length; i++) {
+                if (registrationState(required[i]) !== 'registered') ready = false;
+            }
+            guardState.initialized = ready;
+        } catch (initError) {
+            guardState.initialized = false;
+            logRegistrationError('Ошибка инициализации; повторный запуск разрешён', initError);
+        }
+
+        guardState.loading = false;
+        guardState.initializing = false;
     }
 
     if (window.appready) init();
-    else if (window.Lampa && Lampa.Listener) {
-        Lampa.Listener.follow('app', function (event) {
-            if (event.type === 'ready') init();
-        });
+    else if (window.Lampa && Lampa.Listener && typeof Lampa.Listener.follow === 'function') {
+        if (registrationState('appReadyListener') === 'pending') {
+            setRegistrationState('appReadyListener', 'uncertain');
+            try {
+                Lampa.Listener.follow('app', function (event) {
+                    if (event.type === 'ready') init();
+                });
+                setRegistrationState('appReadyListener', 'registered');
+            } catch (listenerError) {
+                guardState.loading = false;
+                guardState.initializing = false;
+                logRegistrationError('Подписка на app ready имеет неопределённый результат; повторно не добавляется', listenerError);
+                setRegistrationState('appReadyListener', 'uncertain');
+            }
+        }
+    } else {
+        if (registrationState('appReadyListener') === 'pending') {
+            setRegistrationState('appReadyListener', 'pending');
+        }
+        guardState.loading = false;
     }
 })();
