@@ -1,4 +1,4 @@
-/* Lampa DLNA Bridge — Kodi Renderer Probe 0.3.4
+/* Lampa DLNA Bridge — Router HTTP/CORS Probe 0.3.5
  * ES5-compatible diagnostic scaffold. No APK, PC, NAS or external bridge required.
  * This build deliberately does NOT claim SSDP discovery or SOAP control until the
  * AndroidJS/network capabilities and CORS behaviour are verified on the target box.
@@ -6,8 +6,8 @@
 (function () {
     'use strict';
 
-    if (window.lampa_dlna_bridge_034) return;
-    window.lampa_dlna_bridge_034 = true;
+    if (window.lampa_dlna_bridge_035) return;
+    window.lampa_dlna_bridge_035 = true;
 
     var COMPONENT = 'dlna_bridge';
     var PREFIX = 'dlna_bridge_';
@@ -51,14 +51,14 @@
     function showDiagnostics() {
         var r = inspectRuntime();
         var lines = [
-            'Lampa DLNA Bridge 0.3.4 — Kodi test',
+            'Lampa DLNA Bridge 0.3.5 — Router HTTP/CORS test',
             'AndroidJS: ' + (r.androidJS ? 'есть' : 'нет'),
             'AndroidJS.getLampaURL: ' + (r.androidGetLampaURL ? 'есть' : 'нет'),
             'Fetch: ' + (r.fetch ? 'есть' : 'нет'),
             'XMLHttpRequest: ' + (r.xhr ? 'есть' : 'нет'),
             'WebSocket: ' + (r.webSocket ? 'есть' : 'нет'),
             'SSDP UDP multicast: не подтверждён',
-            'Kodi IP: 192.168.1.68; тест URL: порт 1234 / upnpms/device.xml'
+            'DLNA-сервер роутера: 192.168.1.1:8200'
         ];
         notify(lines.join('\n'));
         if (window.console && console.log) console.log('[DLNA Bridge diagnostics]', r);
@@ -69,7 +69,7 @@
     }
 
     function probeDescription() {
-        var url = getValue('description_url', 'http://192.168.1.68:1234/upnpms/device.xml');
+        var url = getValue('description_url', 'http://192.168.1.1:8200/rootDesc.xml');
         if (!url || !validateHttpUrl(url)) {
             notify('Укажите полный HTTP/HTTPS URL XML-описания DLNA-устройства.', 'warning');
             return;
@@ -102,15 +102,64 @@
         }, null, { dataType: 'text', timeout: 10000 });
     }
 
+
+    function probeRouterAccess() {
+        var base = 'http://192.168.1.1:8200';
+        var paths = ['/rootDesc.xml', '/ContentDir.xml'];
+        var results = [];
+        var pending = paths.length * 2;
+
+        function done(label, message) {
+            results.push(label + ': ' + message);
+            pending--;
+            if (pending === 0) {
+                notify('Проверка из Lampa завершена.\\n' + results.join('\\n'), 'default');
+                if (window.console && console.log) console.log('[DLNA Bridge router probe]', results);
+            }
+        }
+
+        paths.forEach(function (path) {
+            var url = base + path;
+
+            if (typeof window.fetch === 'function') {
+                window.fetch(url, { method: 'GET' }).then(function (response) {
+                    done('Fetch ' + path, 'HTTP ' + response.status + (response.ok ? ', доступ есть' : ', ошибка HTTP'));
+                    return response.text();
+                }).catch(function (error) {
+                    done('Fetch ' + path, 'ошибка сети/CORS: ' + (error && error.message ? error.message : String(error)));
+                });
+            } else {
+                done('Fetch ' + path, 'API отсутствует');
+            }
+
+            if (typeof window.XMLHttpRequest === 'function') {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', url, true);
+                xhr.timeout = 8000;
+                xhr.onreadystatechange = function () {
+                    if (xhr.readyState === 4) {
+                        done('XHR ' + path, 'HTTP ' + xhr.status + (xhr.status >= 200 && xhr.status < 300 ? ', доступ есть' : ', ответ/ошибка'));
+                    }
+                };
+                xhr.onerror = function () { done('XHR ' + path, 'ошибка сети/CORS'); };
+                xhr.ontimeout = function () { done('XHR ' + path, 'тайм-аут'); };
+                try { xhr.send(); } catch (e) { done('XHR ' + path, 'ошибка: ' + e.message); }
+            } else {
+                done('XHR ' + path, 'API отсутствует');
+            }
+        });
+    }
+
     function init() {
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) return;
 
         Lampa.Lang.add({
             dlna_bridge_title: { ru: 'DLNA Bridge — автономный режим', en: 'DLNA Bridge — standalone mode' },
-            dlna_bridge_info: { ru: 'Проверяем Kodi на 192.168.1.68. Автопоиск SSDP пока не подтверждён.', en: 'Testing Kodi at 192.168.1.68. SSDP discovery is not yet verified.' },
+            dlna_bridge_info: { ru: 'Проверка HTTP-доступа к DLNA-серверу роутера 192.168.1.1:8200.', en: 'Testing HTTP access to router DLNA server 192.168.1.1:8200.' },
             dlna_bridge_url: { ru: 'URL XML-описания устройства', en: 'Device description XML URL' },
             dlna_bridge_test: { ru: 'Проверить HTTP-доступ', en: 'Test HTTP access' },
-            dlna_bridge_runtime: { ru: 'Диагностика среды', en: 'Runtime diagnostics' }
+            dlna_bridge_runtime: { ru: 'Диагностика среды', en: 'Runtime diagnostics' },
+            dlna_bridge_router_test: { ru: 'Проверить доступ к DLNA-серверу из Lampa', en: 'Test DLNA server access from Lampa' }
         });
 
         Lampa.SettingsApi.addComponent({
@@ -121,7 +170,7 @@
 
         Lampa.SettingsApi.addParam({
             component: COMPONENT,
-            param: { name: PREFIX + 'description_url', type: 'input', values: '', default: 'http://192.168.1.68:1234/upnpms/device.xml', placeholder: 'http://192.168.1.68:1234/upnpms/device.xml' },
+            param: { name: PREFIX + 'description_url', type: 'input', values: '', default: 'http://192.168.1.1:8200/rootDesc.xml', placeholder: 'http://192.168.1.1:8200/rootDesc.xml' },
             field: { name: Lampa.Lang.translate('dlna_bridge_url'), description: Lampa.Lang.translate('dlna_bridge_info') }
         });
 
@@ -137,6 +186,13 @@
             param: { name: PREFIX + 'http_check', type: 'trigger', default: false },
             field: { name: Lampa.Lang.translate('dlna_bridge_test') },
             onChange: function () { probeDescription(); }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: COMPONENT,
+            param: { name: PREFIX + 'router_check', type: 'trigger', default: false },
+            field: { name: Lampa.Lang.translate('dlna_bridge_router_test') },
+            onChange: function () { probeRouterAccess(); }
         });
 
         showDiagnostics();
