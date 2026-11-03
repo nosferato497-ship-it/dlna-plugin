@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.4.3
+/* Lampa DLNA Bridge 0.4.4
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_043';
+    var GUARD = 'lampa_dlna_bridge_044';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -221,8 +221,9 @@
             } else if (key === 'ArrowUp' || code === 38) {
                 event.preventDefault();
                 focusIndex(Math.max(0, active - 1));
-            } else if (key === 'Enter' || code === 13 || code === 23) {
+            } else if (key === 'Enter' || key === ' ' || code === 13 || code === 23 || code === 66 || code === 96) {
                 event.preventDefault();
+                event.stopPropagation();
                 choose(active);
             }
         }
@@ -268,12 +269,13 @@
     }
 
     function play(entry) {
+        notify('Выбран файл: ' + (entry.title || 'без названия'), 'default');
         if (!entry.url) {
             notify('У этого элемента нет прямого URL ресурса.', 'warning');
             return;
         }
         if (!Lampa.Player || !Lampa.Player.play) {
-            notify('Lampa.Player.play недоступен в этой сборке.', 'error');
+            notify('Файл найден, но Lampa.Player.play недоступен в этой сборке.', 'error');
             return;
         }
         try {
@@ -283,7 +285,7 @@
                 quality: 'DLNA'
             });
         } catch (e) {
-            notify('Не удалось запустить видео: ' + e.message, 'error');
+            notify('Ошибка запуска плеера: ' + errorText(e), 'error');
         }
     }
 
