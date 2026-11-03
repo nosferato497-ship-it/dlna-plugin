@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 — Lampa Back API diagnostics
+
+- Added capability diagnostics for `Lampa.Keypad` and `Lampa.Controller` while the DLNA menu is open.
+- Subscribed to `Lampa.Keypad.listener`'s `back` event and display its code, source DOM event, and active controller when available.
+- Prevented duplicate subscriptions and remove the listener on menu close when `listener.remove()` is available; otherwise the inactive callback is safely ignored.
+- Kept the existing DOM key diagnostics and DLNA behavior unchanged.
+
 ## 0.3.1 — Settings compatibility fix
 
 - Added the required empty `values` property to the Lampa `input` setting definition.
