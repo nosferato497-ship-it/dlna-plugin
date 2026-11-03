@@ -2,6 +2,7 @@
 
 ## 0.5.6 — Android bridge diagnostics
 
+- Verify registration outcomes through SettingsApi getters, keep uncertain steps from duplicating entries, isolate optional AndroidJS registration, and use the correct 0.5.6 component label.
 - Added a Lampa settings action to inspect only the known Android bridge globals.
 - Report property and method types plus bounded prototype information without invoking bridge methods or reading accessor properties.
 - Added bounded diagnostics with exception handling; no network or UDP probes are performed.
