@@ -1,4 +1,4 @@
-/* Lampa DLNA Bridge — Kodi Renderer Probe 0.3.3
+/* Lampa DLNA Bridge — Kodi Renderer Probe 0.3.4
  * ES5-compatible diagnostic scaffold. No APK, PC, NAS or external bridge required.
  * This build deliberately does NOT claim SSDP discovery or SOAP control until the
  * AndroidJS/network capabilities and CORS behaviour are verified on the target box.
@@ -6,7 +6,7 @@
 (function () {
     'use strict';
 
-    if (window.lampa_dlna_bridge_033) return;
+    if (window.lampa_dlna_bridge_034) return;
     window.lampa_dlna_bridge_033 = true;
 
     var COMPONENT = 'dlna_bridge';
@@ -51,7 +51,7 @@
     function showDiagnostics() {
         var r = inspectRuntime();
         var lines = [
-            'Lampa DLNA Bridge 0.3.3 — Kodi test',
+            'Lampa DLNA Bridge 0.3.4 — Kodi test',
             'AndroidJS: ' + (r.androidJS ? 'есть' : 'нет'),
             'AndroidJS.getLampaURL: ' + (r.androidGetLampaURL ? 'есть' : 'нет'),
             'Fetch: ' + (r.fetch ? 'есть' : 'нет'),
