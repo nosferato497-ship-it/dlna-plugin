@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.4.7
+/* Lampa DLNA Bridge 0.4.8
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_047';
+    var GUARD = 'lampa_dlna_bridge_048';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -225,11 +225,17 @@
             if (activeMenuClose === close) activeMenuClose = null;
         }
         activeMenuClose = close;
+        var choosing = false;
         function choose(index) {
-            if (index < 0 || index >= entries.length) return;
+            if (choosing || index < 0 || index >= entries.length) return;
+            choosing = true;
             var selected = entries[index];
             close();
-            onSelect(selected);
+            // Give Lampa/WebView time to finish the remote-control key event
+            // and remove the menu before starting navigation or playback.
+            setTimeout(function () {
+                onSelect(selected);
+            }, 220);
         }
         function keyHandler(event) {
             var key = event.key || '';
@@ -369,7 +375,7 @@
             });
         }
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.7', en: 'DLNA Bridge 0.4.7' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.8', en: 'DLNA Bridge 0.4.8' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -377,7 +383,7 @@
         });
         Lampa.SettingsApi.addComponent({
             component: COMPONENT,
-            name: 'DLNA Bridge 0.4.7',
+            name: 'DLNA Bridge 0.4.8',
             icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
         });
         Lampa.SettingsApi.addParam({
