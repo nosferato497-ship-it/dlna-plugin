@@ -1,4 +1,4 @@
-/* Lampa DLNA Bridge — Standalone Probe 0.3.1
+/* Lampa DLNA Bridge — Standalone Probe 0.3.2
  * ES5-compatible diagnostic scaffold. No APK, PC, NAS or external bridge required.
  * This build deliberately does NOT claim SSDP discovery or SOAP control until the
  * AndroidJS/network capabilities and CORS behaviour are verified on the target box.
@@ -14,7 +14,7 @@
 
     function notify(message, style) {
         if (window.Lampa && Lampa.Noty && Lampa.Noty.show) {
-            Lampa.Noty.show(message, { style: style || 'default', time: 5000 });
+            Lampa.Noty.show(message, { style: style || 'default', time: 30000 });
         } else if (window.console) {
             console.log('[DLNA Bridge] ' + message);
         }
@@ -51,7 +51,7 @@
     function showDiagnostics() {
         var r = inspectRuntime();
         var lines = [
-            'Lampa DLNA Bridge 0.3.1',
+            'Lampa DLNA Bridge 0.3.2',
             'AndroidJS: ' + (r.androidJS ? 'есть' : 'нет'),
             'AndroidJS.getLampaURL: ' + (r.androidGetLampaURL ? 'есть' : 'нет'),
             'Fetch: ' + (r.fetch ? 'есть' : 'нет'),
@@ -60,7 +60,7 @@
             'SSDP UDP multicast: не подтверждён',
             'Проверка: ручной HTTP URL и CORS'
         ];
-        notify(lines.join(' · '));
+        notify(lines.join('\n'));
         if (window.console && console.log) console.log('[DLNA Bridge diagnostics]', r);
     }
 
