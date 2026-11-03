@@ -1,290 +1,284 @@
-/* Lampa DLNA Bridge — DLNA Bridge SOAP POST Probe 0.3.7
- * ES5-compatible diagnostic scaffold. No APK, PC, NAS or external bridge required.
- * This build deliberately does NOT claim SSDP discovery or SOAP control until the
- * AndroidJS/network capabilities and CORS behaviour are verified on the target box.
+/* Lampa DLNA Bridge 0.4.0
+ * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
+ * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    if (window.lampa_dlna_bridge_037) return;
-    window.lampa_dlna_bridge_037 = true;
+    var GUARD = 'lampa_dlna_bridge_040';
+    if (window[GUARD]) return;
+    window[GUARD] = true;
 
     var COMPONENT = 'dlna_bridge';
     var PREFIX = 'dlna_bridge_';
+    var DEFAULT_BASE = 'http://192.168.1.1:8200';
+    var SERVICE = 'urn:schemas-upnp-org:service:ContentDirectory:1';
+    var PAGE_SIZE = 200;
+    var MAX_ITEMS = 5000;
+    var cache = {};
+    var currentRequest = null;
 
     function notify(message, style) {
         if (window.Lampa && Lampa.Noty && Lampa.Noty.show) {
-            Lampa.Noty.show(message, { style: style || 'default', time: 30000 });
-        } else if (window.console) {
-            console.log('[DLNA Bridge] ' + message);
-        }
+            Lampa.Noty.show(message, { style: style || 'default', time: 7000 });
+        } else if (window.console) console.log('[DLNA Bridge] ' + message);
     }
 
-    function getValue(key, fallback) {
+    function setting(name, fallback) {
         try {
-            var value = Lampa.Storage.field(PREFIX + key);
-            return value === undefined || value === null ? fallback : value;
-        } catch (e) {
-            return fallback;
-        }
+            var value = Lampa.Storage.field(PREFIX + name);
+            return value === undefined || value === null || value === '' ? fallback : value;
+        } catch (e) { return fallback; }
     }
 
-    function inspectRuntime() {
-        var result = {
-            userAgent: navigator.userAgent || 'unknown',
-            androidJS: typeof window.AndroidJS !== 'undefined',
-            androidGetLampaURL: false,
-            fetch: typeof window.fetch === 'function',
-            xhr: typeof window.XMLHttpRequest === 'function',
-            webSocket: typeof window.WebSocket === 'function',
-            udpSocket: false,
-            ssdp: 'not available in standard browser JavaScript'
-        };
-
-        try {
-            result.androidGetLampaURL = !!(window.AndroidJS && typeof window.AndroidJS.getLampaURL === 'function');
-        } catch (e) {}
-
-        return result;
+    function baseUrl() {
+        return String(setting('server_url', DEFAULT_BASE)).replace(/\/+$/, '');
     }
 
-    function showDiagnostics() {
-        var r = inspectRuntime();
-        var lines = [
-            'Lampa DLNA Bridge 0.3.7 — SOAP POST test',
-            'AndroidJS: ' + (r.androidJS ? 'есть' : 'нет'),
-            'AndroidJS.getLampaURL: ' + (r.androidGetLampaURL ? 'есть' : 'нет'),
-            'Fetch: ' + (r.fetch ? 'есть' : 'нет'),
-            'XMLHttpRequest: ' + (r.xhr ? 'есть' : 'нет'),
-            'WebSocket: ' + (r.webSocket ? 'есть' : 'нет'),
-            'SSDP UDP multicast: не подтверждён',
-            'DLNA-сервер роутера: 192.168.1.1:8200'
-        ];
-        notify(lines.join('\n'));
-        if (window.console && console.log) console.log('[DLNA Bridge diagnostics]', r);
-    }
-
-    function validateHttpUrl(value) {
-        return /^https?:\/\//i.test(value || '');
-    }
-
-    function probeDescription() {
-        var url = getValue('description_url', 'http://192.168.1.1:8200/rootDesc.xml');
-        if (!url || !validateHttpUrl(url)) {
-            notify('Укажите полный HTTP/HTTPS URL XML-описания DLNA-устройства.', 'warning');
-            return;
-        }
-
+    function requestNative(url, body, headers, success, failure) {
         if (!Lampa.Reguest) {
-            notify('В этой сборке Lampa не найден HTTP-клиент Reguest.', 'error');
+            failure(new Error('Lampa.Reguest недоступен'));
             return;
         }
-
-        var request = new Lampa.Reguest();
-        if (request.timeout) request.timeout(10000);
-
-        request.native(url, function (raw) {
-            var responseText = typeof raw === 'string' ? raw : String(raw || '');
-            var isXml = /<\s*(?:\w+:)?root\b/i.test(responseText) || /<\?xml/i.test(responseText);
-            var hasAvTransport = /AVTransport/i.test(responseText);
-            var hasContentDirectory = /ContentDirectory/i.test(responseText);
-            var summary = 'HTTP-ответ получен; XML: ' + (isXml ? 'похоже на XML' : 'не распознан') +
-                '; AVTransport: ' + (hasAvTransport ? 'есть' : 'нет') +
-                '; ContentDirectory: ' + (hasContentDirectory ? 'есть' : 'нет');
-            notify(summary, 'success');
-            if (window.console && console.log) console.log('[DLNA Bridge description]', responseText);
-            if (request.clear) request.clear();
+        var req = new Lampa.Reguest();
+        currentRequest = req;
+        try { if (req.timeout) req.timeout(20000); } catch (e) {}
+        req.native(url, function (raw) {
+            if (currentRequest === req) currentRequest = null;
+            if (req.clear) req.clear();
+            success(typeof raw === 'string' ? raw : String(raw || ''));
         }, function (xhr, error) {
-            var status = xhr && xhr.status ? xhr.status : 'нет HTTP-статуса';
-            notify('Не удалось прочитать описание устройства (' + status + '). Возможны CORS, HTTP/HTTPS или сетевые ограничения.', 'error');
-            if (window.console && console.warn) console.warn('[DLNA Bridge probe failed]', error, xhr);
-            if (request.clear) request.clear();
-        }, null, { dataType: 'text', timeout: 10000 });
-    }
-
-
-    function probeRouterAccess() {
-        var base = 'http://192.168.1.1:8200';
-        var paths = ['/rootDesc.xml', '/ContentDir.xml'];
-        var results = [];
-        var pending = paths.length * 3;
-
-        function done(label, message) {
-            results.push(label + ': ' + message);
-            pending--;
-            if (pending === 0) {
-                notify('Проверка из Lampa завершена.\\n' + results.join('\\n'), 'default');
-                if (window.console && console.log) console.log('[DLNA Bridge router probe]', results);
-            }
-        }
-
-        paths.forEach(function (path) {
-            var url = base + path;
-
-            if (typeof window.fetch === 'function') {
-                window.fetch(url, { method: 'GET' }).then(function (response) {
-                    done('Fetch ' + path, 'HTTP ' + response.status + (response.ok ? ', доступ есть' : ', ошибка HTTP'));
-                }).catch(function (error) {
-                    done('Fetch ' + path, 'ошибка сети/CORS: ' + (error && error.message ? error.message : String(error)));
-                });
-            } else {
-                done('Fetch ' + path, 'API отсутствует');
-            }
-
-            if (typeof window.XMLHttpRequest === 'function') {
-                var xhr = new XMLHttpRequest();
-                var xhrDone = false;
-                function finishXhr(message) {
-                    if (xhrDone) return;
-                    xhrDone = true;
-                    done('XHR ' + path, message);
-                }
-                xhr.open('GET', url, true);
-                xhr.timeout = 8000;
-                xhr.onreadystatechange = function () {
-                    if (xhr.readyState === 4) {
-                        finishXhr('HTTP ' + xhr.status + (xhr.status >= 200 && xhr.status < 300 ? ', доступ есть' : ', ответ/ошибка'));
-                    }
-                };
-                xhr.onerror = function () { finishXhr('ошибка сети/CORS'); };
-                xhr.ontimeout = function () { finishXhr('тайм-аут'); };
-                try { xhr.send(); } catch (e) { finishXhr('ошибка: ' + e.message); }
-            } else {
-                done('XHR ' + path, 'API отсутствует');
-            }
-
-            if (window.Lampa && Lampa.Reguest) {
-                var request = new Lampa.Reguest();
-                if (request.timeout) request.timeout(10000);
-                request.native(url, function (raw) {
-                    var text = typeof raw === 'string' ? raw : String(raw || '');
-                    done('Lampa Reguest.native ' + path, text.length ? 'ответ получен (' + text.length + ' символов)' : 'пустой ответ');
-                    if (request.clear) request.clear();
-                }, function (xhr, error) {
-                    var status = xhr && xhr.status ? xhr.status : 0;
-                    done('Lampa Reguest.native ' + path, 'ошибка, HTTP ' + status + (error ? ': ' + String(error) : ''));
-                    if (request.clear) request.clear();
-                }, null, { dataType: 'text', timeout: 10000 });
-            } else {
-                done('Lampa Reguest.native ' + path, 'API отсутствует');
-            }
+            if (currentRequest === req) currentRequest = null;
+            if (req.clear) req.clear();
+            failure(new Error((xhr && xhr.status ? 'HTTP ' + xhr.status + ': ' : '') + (error || 'ошибка запроса')));
+        }, body || null, {
+            dataType: 'text',
+            timeout: 20000,
+            headers: headers || {}
         });
     }
 
+    function xmlEscape(value) {
+        return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+    }
 
-    // SOAP POST probe: verifies the native Lampa transport before enabling browsing.
-    function probeSoapBrowse() {
-        var url = 'http://192.168.1.1:8200/ctl/ContentDir';
-        var service = 'urn:schemas-upnp-org:service:ContentDirectory:1';
-        var body =
-            '<?xml version="1.0" encoding="utf-8"?>' +
-            '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' +
-            's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' +
-            '<s:Body><u:Browse xmlns:u="' + service + '">' +
-            '<ObjectID>0</ObjectID>' +
-            '<BrowseFlag>BrowseDirectChildren</BrowseFlag>' +
-            '<Filter>*</Filter>' +
-            '<StartingIndex>0</StartingIndex>' +
-            '<RequestedCount>20</RequestedCount>' +
-            '<SortCriteria></SortCriteria>' +
-            '</u:Browse></s:Body></s:Envelope>';
-
-        if (!window.Lampa || typeof Lampa.Reguest !== 'function') {
-            notify('SOAP-тест: Lampa.Reguest недоступен.', 'error');
-            return;
+    function textOf(node, tag) {
+        var list = node.getElementsByTagName(tag);
+        if (!list || !list.length) {
+            var all = node.getElementsByTagName('*');
+            for (var i = 0; i < all.length; i++) {
+                if (all[i].localName === tag) return all[i].textContent || '';
+            }
+            return '';
         }
+        return list[0].textContent || '';
+    }
 
-        var request = new Lampa.Reguest();
-        try { if (request.timeout) request.timeout(15000); } catch (e) {}
+    function parseXml(raw) {
+        if (!window.DOMParser) throw new Error('DOMParser недоступен в WebView');
+        var doc = new DOMParser().parseFromString(raw, 'text/xml');
+        if (doc.getElementsByTagName('parsererror').length) throw new Error('Некорректный XML');
+        return doc;
+    }
 
-        request.native(
-            url,
-            function (raw) {
-                var responseText = typeof raw === 'string' ? raw : String(raw || '');
-                var isSoap = /Envelope/i.test(responseText) && /BrowseResponse/i.test(responseText);
-                var hasFault = /<[^>]*Fault\b/i.test(responseText) || /<faultstring>/i.test(responseText);
-                var resultMatch = responseText.match(/<(?:\w+:)?Result[^>]*>([\s\S]*?)<\/(?:\w+:)?Result>/i);
-                var resultText = resultMatch ? resultMatch[1] : '';
-                var count = (resultText.match(/<(?:\w+:)?(?:container|item)\b/gi) || []).length;
-                var message = 'SOAP POST: ' + (isSoap ? 'ответ Browse получен' : 'ответ получен, формат не распознан') +
-                    '; объектов в Result: ' + count + (hasFault ? '; SOAP Fault' : '');
-                notify(message, hasFault || !isSoap ? 'error' : 'success');
-                if (window.console && console.log) console.log('[DLNA Bridge SOAP probe]', responseText);
-                if (request.clear) request.clear();
-            },
-            function (xhr, error) {
-                var status = xhr && xhr.status ? xhr.status : 0;
-                notify('SOAP POST не выполнен. HTTP ' + status + (error ? ': ' + String(error) : ''), 'error');
-                if (window.console && console.warn) console.warn('[DLNA Bridge SOAP probe failed]', error, xhr);
-                if (request.clear) request.clear();
-            },
-            body,
-            {
-                dataType: 'text',
-                timeout: 15000,
-                headers: {
-                    'Content-Type': 'text/xml; charset="utf-8"',
-                    'SOAPAction': '"' + service + '#Browse"'
+    function decodeDidl(encoded) {
+        var doc = parseXml('<root>' + encoded + '</root>');
+        var nodes = doc.getElementsByTagName('*');
+        var items = [];
+        for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i];
+            var kind = node.localName || node.nodeName.split(':').pop();
+            if (kind !== 'container' && kind !== 'item') continue;
+            var entry = {
+                id: node.getAttribute('id') || '',
+                parentID: node.getAttribute('parentID') || '',
+                title: '',
+                isFolder: kind === 'container',
+                childCount: parseInt(node.getAttribute('childCount') || '0', 10),
+                url: '',
+                protocolInfo: '',
+                mime: '',
+                duration: '',
+                size: 0
+            };
+            for (var j = 0; j < node.childNodes.length; j++) {
+                var child = node.childNodes[j];
+                if (child.nodeType !== 1) continue;
+                var name = child.localName || child.nodeName.split(':').pop();
+                if (name === 'title') entry.title = child.textContent || '';
+                if (name === 'res') {
+                    entry.url = child.textContent || '';
+                    entry.protocolInfo = child.getAttribute('protocolInfo') || '';
+                    entry.duration = child.getAttribute('duration') || '';
+                    entry.size = parseInt(child.getAttribute('size') || '0', 10);
                 }
             }
-        );
+            var p = entry.protocolInfo.split(':');
+            entry.mime = p.length > 2 ? p[2] : '';
+            if (entry.title) items.push(entry);
+        }
+        return items;
+    }
+
+    function soapBrowse(objectId, start, count, success, failure) {
+        var body = '<?xml version="1.0" encoding="utf-8"?>' +
+            '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' +
+            '<s:Body><u:Browse xmlns:u="' + SERVICE + '">' +
+            '<ObjectID>' + xmlEscape(objectId) + '</ObjectID>' +
+            '<BrowseFlag>BrowseDirectChildren</BrowseFlag><Filter>*</Filter>' +
+            '<StartingIndex>' + start + '</StartingIndex><RequestedCount>' + count + '</RequestedCount>' +
+            '<SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>';
+        requestNative(baseUrl() + '/ctl/ContentDir', body, {
+            'Content-Type': 'text/xml; charset="utf-8"',
+            'SOAPAction': '"' + SERVICE + '#Browse"'
+        }, function (raw) {
+            try {
+                var doc = parseXml(raw);
+                var faults = doc.getElementsByTagName('Fault');
+                if (faults.length) throw new Error(textOf(faults[0], 'faultstring') || 'SOAP Fault');
+                var result = '';
+                var resultNodes = doc.getElementsByTagName('Result');
+                if (!resultNodes.length) {
+                    var all = doc.getElementsByTagName('*');
+                    for (var i = 0; i < all.length; i++) {
+                        if (all[i].localName === 'Result') { result = all[i].textContent || ''; break; }
+                    }
+                } else result = resultNodes[0].textContent || '';
+                var total = parseInt(textOf(doc.documentElement, 'TotalMatches') || '0', 10);
+                var update = textOf(doc.documentElement, 'UpdateID') || '';
+                success(decodeDidl(result), total, update);
+            } catch (e) { failure(e); }
+        }, failure);
+    }
+
+    function browseAll(objectId, callback) {
+        if (cache[objectId]) { callback(null, cache[objectId].slice()); return; }
+        var collected = [];
+        var offset = 0;
+        function page() {
+            soapBrowse(objectId, offset, PAGE_SIZE, function (items, total) {
+                collected = collected.concat(items);
+                offset += items.length;
+                if (offset < total && items.length && offset < MAX_ITEMS) page();
+                else {
+                    cache[objectId] = collected.slice();
+                    callback(null, collected);
+                }
+            }, function (error) { callback(error); });
+        }
+        page();
+    }
+
+    function openSelect(title, entries, onSelect, onBack) {
+        if (!Lampa.Select || !Lampa.Select.show) {
+            notify('В этой версии Lampa не найден интерфейс Select.', 'error');
+            return;
+        }
+        Lampa.Select.show({
+            title: title,
+            items: entries,
+            onSelect: onSelect,
+            onBack: onBack || function () {}
+        });
+    }
+
+    function formatSize(bytes) {
+        if (!bytes) return '';
+        var gb = bytes / 1073741824;
+        return gb >= 1 ? gb.toFixed(2) + ' ГБ' : (bytes / 1048576).toFixed(0) + ' МБ';
+    }
+
+    function play(entry) {
+        if (!entry.url) {
+            notify('У этого элемента нет прямого URL ресурса.', 'warning');
+            return;
+        }
+        if (!Lampa.Player || !Lampa.Player.play) {
+            notify('Lampa.Player.play недоступен в этой сборке.', 'error');
+            return;
+        }
+        try {
+            Lampa.Player.play({
+                url: entry.url,
+                title: entry.title,
+                quality: 'DLNA'
+            });
+        } catch (e) {
+            notify('Не удалось запустить видео: ' + e.message, 'error');
+        }
+    }
+
+    function showFolder(objectId, title, parents) {
+        notify('Загрузка: ' + title);
+        browseAll(objectId, function (error, items) {
+            if (error) {
+                notify('Ошибка Browse: ' + error.message, 'error');
+                return;
+            }
+            if (!items.length) {
+                notify('Папка пуста.');
+                return;
+            }
+            var rows = items.map(function (entry) {
+                var subtitle = entry.isFolder ? ('Папка' + (entry.childCount ? ' · ' + entry.childCount : '')) :
+                    [entry.mime, entry.duration, formatSize(entry.size)].filter(Boolean).join(' · ');
+                return {
+                    title: entry.title,
+                    subtitle: subtitle,
+                    template: 'select',
+                    entry: entry
+                };
+            });
+            openSelect(title, rows, function (selected) {
+                var entry = selected.entry || selected;
+                if (entry.isFolder) showFolder(entry.id, entry.title, (parents || []).concat([{ id: objectId, title: title }]));
+                else play(entry);
+            }, function () {
+                if (parents && parents.length) {
+                    var parent = parents[parents.length - 1];
+                    showFolder(parent.id, parent.title, parents.slice(0, -1));
+                }
+            });
+        });
+    }
+
+    function openCatalog() {
+        cache = {};
+        showFolder('0', 'DLNA — ' + baseUrl(), []);
     }
 
     function init() {
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) return;
-
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge — автономный режим', en: 'DLNA Bridge — standalone mode' },
-            dlna_bridge_info: { ru: 'Проверка HTTP-доступа к DLNA-серверу роутера 192.168.1.1:8200.', en: 'Testing HTTP access to router DLNA server 192.168.1.1:8200.' },
-            dlna_bridge_url: { ru: 'URL XML-описания устройства', en: 'Device description XML URL' },
-            dlna_bridge_test: { ru: 'Проверить HTTP-доступ', en: 'Test HTTP access' },
-            dlna_bridge_runtime: { ru: 'Диагностика среды', en: 'Runtime diagnostics' },
-            dlna_bridge_router_test: { ru: 'Проверить доступ к DLNA-серверу из Lampa', en: 'Test DLNA server access from Lampa' },
-            dlna_bridge_soap_test: { ru: 'Проверить SOAP Browse (POST)', en: 'Test SOAP Browse (POST)' }
+            dlna_bridge_title: { ru: 'DLNA Bridge', en: 'DLNA Bridge' },
+            dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
+            dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
+            dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
+            dlna_bridge_about: { ru: 'MiniDLNA: SOAP Browse через Lampa.Reguest.native. SSDP discovery пока не реализован.', en: 'MiniDLNA SOAP Browse via Lampa.Reguest.native. SSDP discovery is not implemented yet.' }
         });
-
         Lampa.SettingsApi.addComponent({
             component: COMPONENT,
             name: Lampa.Lang.translate('dlna_bridge_title'),
-            icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M7 9h10M7 12h6"/></svg>'
+            icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
         });
-
         Lampa.SettingsApi.addParam({
             component: COMPONENT,
-            param: { name: PREFIX + 'description_url', type: 'input', values: '', default: 'http://192.168.1.1:8200/rootDesc.xml', placeholder: 'http://192.168.1.1:8200/rootDesc.xml' },
-            field: { name: Lampa.Lang.translate('dlna_bridge_url'), description: Lampa.Lang.translate('dlna_bridge_info') }
+            param: { name: PREFIX + 'server_url', type: 'input', values: '', default: DEFAULT_BASE, placeholder: DEFAULT_BASE },
+            field: { name: Lampa.Lang.translate('dlna_bridge_server'), description: Lampa.Lang.translate('dlna_bridge_about') }
         });
-
         Lampa.SettingsApi.addParam({
             component: COMPONENT,
-            param: { name: PREFIX + 'runtime_check', type: 'trigger', default: false },
-            field: { name: Lampa.Lang.translate('dlna_bridge_runtime') },
-            onChange: function () { showDiagnostics(); }
+            param: { name: PREFIX + 'open_catalog', type: 'trigger', default: false },
+            field: { name: Lampa.Lang.translate('dlna_bridge_open') },
+            onChange: function () { openCatalog(); }
         });
-
         Lampa.SettingsApi.addParam({
             component: COMPONENT,
-            param: { name: PREFIX + 'http_check', type: 'trigger', default: false },
-            field: { name: Lampa.Lang.translate('dlna_bridge_test') },
-            onChange: function () { probeDescription(); }
+            param: { name: PREFIX + 'clear_cache', type: 'trigger', default: false },
+            field: { name: Lampa.Lang.translate('dlna_bridge_clear') },
+            onChange: function () { cache = {}; notify('Кеш каталога очищен.', 'success'); }
         });
-
-        Lampa.SettingsApi.addParam({
-            component: COMPONENT,
-            param: { name: PREFIX + 'router_check', type: 'trigger', default: false },
-            field: { name: Lampa.Lang.translate('dlna_bridge_router_test') },
-            onChange: function () { probeRouterAccess(); }
-        });
-
-
-        Lampa.SettingsApi.addParam({
-            component: COMPONENT,
-            param: { name: PREFIX + 'soap_check', type: 'trigger', default: false },
-            field: { name: Lampa.Lang.translate('dlna_bridge_soap_test') },
-            onChange: function () { probeSoapBrowse(); }
-        });
-
-        showDiagnostics();
     }
 
     if (window.appready) init();
