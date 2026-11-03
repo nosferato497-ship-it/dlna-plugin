@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.4.0
+/* Lampa DLNA Bridge 0.4.1
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_040';
+    var GUARD = 'lampa_dlna_bridge_041';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -17,6 +17,13 @@
     var MAX_ITEMS = 5000;
     var cache = {};
     var currentRequest = null;
+
+    function errorText(error) {
+        if (error === null || error === undefined) return 'неизвестная ошибка (пустой ответ обработчика)';
+        if (typeof error === 'string') return error;
+        if (error.message) return error.message;
+        try { return JSON.stringify(error); } catch (e) { return String(error); }
+    }
 
     function notify(message, style) {
         if (window.Lampa && Lampa.Noty && Lampa.Noty.show) {
@@ -50,7 +57,7 @@
         }, function (xhr, error) {
             if (currentRequest === req) currentRequest = null;
             if (req.clear) req.clear();
-            failure(new Error((xhr && xhr.status ? 'HTTP ' + xhr.status + ': ' : '') + (error || 'ошибка запроса')));
+            failure(new Error((xhr && xhr.status ? 'HTTP ' + xhr.status + ': ' : '') + (errorText(error) || 'ошибка запроса')));
         }, body || null, {
             dataType: 'text',
             timeout: 20000,
@@ -78,7 +85,7 @@
     function parseXml(raw) {
         if (!window.DOMParser) throw new Error('DOMParser недоступен в WebView');
         var doc = new DOMParser().parseFromString(raw, 'text/xml');
-        if (doc.getElementsByTagName('parsererror').length) throw new Error('Некорректный XML');
+        if (doc.getElementsByTagName('parsererror').length) throw new Error('Ответ не является корректным XML: ' + String(raw).slice(0, 180));
         return doc;
     }
 
@@ -148,7 +155,10 @@
                 var total = parseInt(textOf(doc.documentElement, 'TotalMatches') || '0', 10);
                 var update = textOf(doc.documentElement, 'UpdateID') || '';
                 success(decodeDidl(result), total, update);
-            } catch (e) { failure(e); }
+            } catch (e) {
+                if (window.console && console.error) console.error('[DLNA Bridge] Browse response parse failed', e, raw);
+                failure(new Error('Разбор ответа SOAP/DIDL: ' + errorText(e)));
+            }
         }, failure);
     }
 
@@ -213,7 +223,7 @@
         notify('Загрузка: ' + title);
         browseAll(objectId, function (error, items) {
             if (error) {
-                notify('Ошибка Browse: ' + error.message, 'error');
+                notify('Ошибка Browse: ' + errorText(error), 'error');
                 return;
             }
             if (!items.length) {
@@ -251,7 +261,7 @@
     function init() {
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) return;
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge', en: 'DLNA Bridge' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.1', en: 'DLNA Bridge 0.4.1' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
