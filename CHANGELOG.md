@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.5 — Restore DLNA settings focus after playback
+
+- Restore the controller that opened the Select after folder selection and Back, so folder navigation keeps its Lampa context.
+- Use `Lampa.Player.callback()` to return to the originating controller when playback closes, with a player-close listener fallback.
+- Keep the catalog cache across menu openings; users can still clear it with the existing cache action.
+- Bump the plugin version and load guard.
+
 ## 0.5.4 — Native Lampa Select menu
 
 - Replaced the primary hand-built catalog menu with `Lampa.Select.show()` using its documented `{ title, items, onSelect, onBack }` contract.
