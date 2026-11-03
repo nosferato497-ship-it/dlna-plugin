@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.4.5
+/* Lampa DLNA Bridge 0.4.6
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_045';
+    var GUARD = 'lampa_dlna_bridge_046';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -17,6 +17,8 @@
     var MAX_ITEMS = 5000;
     var cache = {};
     var currentRequest = null;
+    var activeMenuClose = null;
+    var playerCloseBound = false;
 
     function errorText(error) {
         if (error === null || error === undefined) return 'неизвестная ошибка (пустой ответ обработчика)';
@@ -203,7 +205,9 @@
             overlay.style.visibility = 'hidden';
             overlay.style.pointerEvents = 'none';
             if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            if (activeMenuClose === close) activeMenuClose = null;
         }
+        activeMenuClose = close;
         function choose(index) {
             if (index < 0 || index >= entries.length) return;
             var selected = entries[index];
@@ -339,8 +343,16 @@
 
     function init() {
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) return;
+        if (!playerCloseBound && Lampa.Player && Lampa.Player.listener && Lampa.Player.listener.follow) {
+            playerCloseBound = true;
+            Lampa.Player.listener.follow('close', function () {
+                if (activeMenuClose) activeMenuClose();
+                var staleMenu = document.getElementById('dlna-bridge-menu');
+                if (staleMenu && staleMenu.parentNode) staleMenu.parentNode.removeChild(staleMenu);
+            });
+        }
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.5', en: 'DLNA Bridge 0.4.5' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.6', en: 'DLNA Bridge 0.4.6' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -348,7 +360,7 @@
         });
         Lampa.SettingsApi.addComponent({
             component: COMPONENT,
-            name: 'DLNA Bridge 0.4.5',
+            name: 'DLNA Bridge 0.4.6',
             icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
         });
         Lampa.SettingsApi.addParam({
