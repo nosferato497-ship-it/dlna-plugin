@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.4.4
+/* Lampa DLNA Bridge 0.4.5
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_044';
+    var GUARD = 'lampa_dlna_bridge_045';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -186,7 +186,7 @@
 
         var overlay = document.createElement('div');
         overlay.id = 'dlna-bridge-menu';
-        overlay.style.cssText = 'position:fixed;z-index:999999;inset:0;background:rgba(0,0,0,.94);color:#fff;padding:5vh 6vw;box-sizing:border-box;font-family:Arial,sans-serif;overflow:auto;';
+        overlay.style.cssText = 'position:fixed;z-index:1000;inset:0;background:rgba(0,0,0,.94);color:#fff;padding:5vh 6vw;box-sizing:border-box;font-family:Arial,sans-serif;overflow:auto;';
         var heading = document.createElement('div');
         heading.textContent = title;
         heading.style.cssText = 'font-size:26px;font-weight:bold;margin:0 0 22px;';
@@ -199,6 +199,9 @@
         var buttons = [];
         function close() {
             document.removeEventListener('keydown', keyHandler, true);
+            overlay.style.display = 'none';
+            overlay.style.visibility = 'hidden';
+            overlay.style.pointerEvents = 'none';
             if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
         }
         function choose(index) {
@@ -269,6 +272,13 @@
     }
 
     function play(entry) {
+        var menu = document.getElementById('dlna-bridge-menu');
+        if (menu) {
+            menu.style.display = 'none';
+            menu.style.visibility = 'hidden';
+            menu.style.pointerEvents = 'none';
+            if (menu.parentNode) menu.parentNode.removeChild(menu);
+        }
         notify('Выбран файл: ' + (entry.title || 'без названия'), 'default');
         if (!entry.url) {
             notify('У этого элемента нет прямого URL ресурса.', 'warning');
