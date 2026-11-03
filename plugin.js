@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.5.0
+/* Lampa DLNA Bridge 0.5.1
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_050';
+    var GUARD = 'lampa_dlna_bridge_051';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -217,7 +217,8 @@
 
         var buttons = [];
         function close() {
-            document.removeEventListener('keydown', keyHandler, true);
+            window.removeEventListener('keydown', keyHandler, true);
+            window.removeEventListener('keyup', keyUpHandler, true);
             overlay.style.display = 'none';
             overlay.style.visibility = 'hidden';
             overlay.style.pointerEvents = 'none';
@@ -237,24 +238,35 @@
                 onSelect(selected);
             }, 600);
         }
+        function isBackKey(event) {
+            var key = event.key || '';
+            var code = event.keyCode || event.which;
+            return key === 'Escape' || key === 'Backspace' || key === 'BrowserBack' || key === 'GoBack' ||
+                code === 4 || code === 8 || code === 27 || code === 111 || code === 166 || code === 461 || code === 10009;
+        }
+        function swallow(event) {
+            if (event.preventDefault) event.preventDefault();
+            if (event.stopPropagation) event.stopPropagation();
+            if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+        }
+        function keyUpHandler(event) {
+            if (isBackKey(event)) swallow(event);
+        }
         function keyHandler(event) {
             var key = event.key || '';
             var code = event.keyCode || event.which;
-            if (key === 'Escape' || key === 'Backspace' || key === 'BrowserBack' || key === 'GoBack' ||
-                code === 4 || code === 8 || code === 27 || code === 111 || code === 166 || code === 461 || code === 10009) {
-                event.preventDefault();
-                event.stopPropagation();
+            if (isBackKey(event)) {
+                swallow(event);
                 close();
                 if (onBack) onBack();
             } else if (key === 'ArrowDown' || code === 40) {
-                event.preventDefault();
+                swallow(event);
                 focusIndex(Math.min(buttons.length - 1, active + 1));
             } else if (key === 'ArrowUp' || code === 38) {
-                event.preventDefault();
+                swallow(event);
                 focusIndex(Math.max(0, active - 1));
             } else if (key === 'Enter' || key === ' ' || code === 13 || code === 23 || code === 66 || code === 96) {
-                event.preventDefault();
-                event.stopPropagation();
+                swallow(event);
                 choose(active);
             }
         }
@@ -289,7 +301,8 @@
             list.appendChild(empty);
         }
         document.body.appendChild(overlay);
-        document.addEventListener('keydown', keyHandler, true);
+        window.addEventListener('keydown', keyHandler, true);
+        window.addEventListener('keyup', keyUpHandler, true);
         focusIndex(0);
     }
 
@@ -376,7 +389,7 @@
             });
         }
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.5.0', en: 'DLNA Bridge 0.5.0' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.5.1', en: 'DLNA Bridge 0.5.1' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -384,7 +397,7 @@
         });
         Lampa.SettingsApi.addComponent({
             component: COMPONENT,
-            name: 'DLNA Bridge 0.5.0',
+            name: 'DLNA Bridge 0.5.1',
             icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
         });
         Lampa.SettingsApi.addParam({
