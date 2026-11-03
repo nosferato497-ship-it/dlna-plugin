@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.4 — Native Lampa Select menu
+
+- Replaced the primary hand-built catalog menu with `Lampa.Select.show()` using its documented `{ title, items, onSelect, onBack }` contract.
+- Back inside a folder opens its parent; Back at the catalog root closes Select and lets Lampa restore the prior controller focus.
+- Kept the previous DOM menu as a fallback when the Select/Controller APIs are missing or incompatible.
+- Preserved the Back API diagnostic panel in the native Select menu and bumped the plugin guard/version.
+- Run the native Select item callback immediately after Lampa closes the menu; avoid broad `closeAll()` cleanup if Select initialization throws.
+- Left SOAP Browse, pagination/cache, DIDL-Lite parsing, and playback unchanged.
+
 ## 0.5.3 — Lampa Back API diagnostics
 
 - Added capability diagnostics for `Lampa.Keypad` and `Lampa.Controller` while the DLNA menu is open.
