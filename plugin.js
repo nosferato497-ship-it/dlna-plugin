@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.5.4
+/* Lampa DLNA Bridge 0.5.5
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_054';
+    var GUARD = 'lampa_dlna_bridge_055';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -19,6 +19,7 @@
     var currentRequest = null;
     var activeMenuClose = null;
     var playerCloseBound = false;
+    var playerReturnController = null;
     var keypadBackHandlerAttached = false;
     var keypadBackHandlerActive = false;
     var keypadBackListener = null;
@@ -289,14 +290,41 @@
         var controller = window.Lampa && Lampa.Controller;
         return !!(select && typeof select.show === 'function' && controller &&
             typeof controller.add === 'function' && typeof controller.toggle === 'function' &&
+            typeof controller.enabled === 'function' &&
             typeof controller.windowOpen === 'function' && typeof controller.windowClose === 'function' &&
             typeof controller.collectionSet === 'function' && typeof controller.collectionFocus === 'function' &&
             typeof window.$ === 'function');
     }
 
     function openSelect(title, entries, onSelect, onBack) {
+        var previousController = '';
+        try {
+            var enabledController = Lampa.Controller.enabled();
+            if (enabledController && enabledController.name) previousController = enabledController.name;
+        } catch (controllerError) {}
+
+        function restoreController() {
+            if (!previousController || !Lampa.Controller || typeof Lampa.Controller.toggle !== 'function') return;
+            try {
+                var currentController = Lampa.Controller.enabled();
+                if (!currentController || currentController.name !== previousController) {
+                    Lampa.Controller.toggle(previousController);
+                }
+            } catch (controllerError) {}
+        }
+
+        function selectItem(selected) {
+            restoreController();
+            if (onSelect) onSelect(selected);
+        }
+
+        function backFromSelect() {
+            restoreController();
+            if (onBack) onBack();
+        }
+
         if (!hasNativeSelectApi()) {
-            openSelectDom(title, entries, onSelect, onBack);
+            openSelectDom(title, entries, selectItem, backFromSelect);
             return;
         }
 
@@ -309,7 +337,7 @@
                     onSelect: function () {
                         activeMenuClose = null;
                         deactivateKeypadBackDiagnostic();
-                        onSelect(entry);
+                        selectItem(entry);
                     }
                 };
             });
@@ -334,7 +362,7 @@
                 onBack: function () {
                     activeMenuClose = null;
                     deactivateKeypadBackDiagnostic();
-                    if (onBack) onBack();
+                    backFromSelect();
                 }
             });
         } catch (e) {
@@ -347,7 +375,7 @@
                 }
             } catch (openedError) {}
             notify('Lampa.Select недоступен, открываю резервное меню: ' + errorText(e), 'warning');
-            openSelectDom(title, entries, onSelect, onBack);
+            openSelectDom(title, entries, selectItem, backFromSelect);
         }
     }
 
@@ -501,12 +529,33 @@
             return;
         }
         try {
+            var currentController = Lampa.Controller && typeof Lampa.Controller.enabled === 'function' ? Lampa.Controller.enabled() : null;
+            playerReturnController = currentController && currentController.name ? currentController.name : null;
+            if (playerReturnController && typeof Lampa.Player.callback === 'function') {
+                Lampa.Player.callback(function () {
+                    var returnTo = playerReturnController;
+                    if (returnTo && Lampa.Controller && typeof Lampa.Controller.toggle === 'function') {
+                        try {
+                            Lampa.Controller.toggle(returnTo);
+                            playerReturnController = null;
+                        } catch (controllerError) {
+                            playerReturnController = returnTo;
+                        }
+                    }
+                });
+            }
+        } catch (controllerError) {}
+        try {
             Lampa.Player.play({
                 url: entry.url,
                 title: entry.title,
                 quality: 'DLNA'
             });
         } catch (e) {
+            playerReturnController = null;
+            try {
+                if (typeof Lampa.Player.callback === 'function') Lampa.Player.callback(null);
+            } catch (callbackError) {}
             notify('Ошибка запуска плеера: ' + errorText(e), 'error');
         }
     }
@@ -545,7 +594,6 @@
     }
 
     function openCatalog() {
-        cache = {};
         showFolder('0', 'DLNA — ' + baseUrl(), []);
     }
 
@@ -557,10 +605,19 @@
                 if (activeMenuClose) activeMenuClose();
                 var staleMenu = document.getElementById('dlna-bridge-menu');
                 if (staleMenu && staleMenu.parentNode) staleMenu.parentNode.removeChild(staleMenu);
+                if (playerReturnController) {
+                    var returnTo = playerReturnController;
+                    if (Lampa.Controller && typeof Lampa.Controller.toggle === 'function') {
+                        try {
+                            Lampa.Controller.toggle(returnTo);
+                            playerReturnController = null;
+                        } catch (controllerError) {}
+                    }
+                }
             });
         }
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.5.4', en: 'DLNA Bridge 0.5.4' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.5.5', en: 'DLNA Bridge 0.5.5' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -568,7 +625,7 @@
         });
         Lampa.SettingsApi.addComponent({
             component: COMPONENT,
-            name: 'DLNA Bridge 0.5.4',
+            name: 'DLNA Bridge 0.5.5',
             icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
         });
         Lampa.SettingsApi.addParam({
