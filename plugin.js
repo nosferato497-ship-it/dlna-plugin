@@ -1,4 +1,4 @@
-/* Lampa DLNA Bridge — Router HTTP/CORS Probe 0.3.5
+/* Lampa DLNA Bridge — DLNA Bridge SOAP POST Probe 0.3.7
  * ES5-compatible diagnostic scaffold. No APK, PC, NAS or external bridge required.
  * This build deliberately does NOT claim SSDP discovery or SOAP control until the
  * AndroidJS/network capabilities and CORS behaviour are verified on the target box.
@@ -6,7 +6,7 @@
 (function () {
     'use strict';
 
-    if (window.lampa_dlna_bridge_035) return;
+    if (window.lampa_dlna_bridge_037) return;
     window.lampa_dlna_bridge_035 = true;
 
     var COMPONENT = 'dlna_bridge';
@@ -51,7 +51,7 @@
     function showDiagnostics() {
         var r = inspectRuntime();
         var lines = [
-            'Lampa DLNA Bridge 0.3.5 — Router HTTP/CORS test',
+            'Lampa DLNA Bridge 0.3.7 — SOAP POST test',
             'AndroidJS: ' + (r.androidJS ? 'есть' : 'нет'),
             'AndroidJS.getLampaURL: ' + (r.androidGetLampaURL ? 'есть' : 'нет'),
             'Fetch: ' + (r.fetch ? 'есть' : 'нет'),
@@ -171,6 +171,65 @@
         });
     }
 
+
+    // SOAP POST probe: verifies the native Lampa transport before enabling browsing.
+    function probeSoapBrowse() {
+        var url = 'http://192.168.1.1:8200/ctl/ContentDir';
+        var service = 'urn:schemas-upnp-org:service:ContentDirectory:1';
+        var body =
+            '<?xml version="1.0" encoding="utf-8"?>' +
+            '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' +
+            's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' +
+            '<s:Body><u:Browse xmlns:u="' + service + '">' +
+            '<ObjectID>0</ObjectID>' +
+            '<BrowseFlag>BrowseDirectChildren</BrowseFlag>' +
+            '<Filter>*</Filter>' +
+            '<StartingIndex>0</StartingIndex>' +
+            '<RequestedCount>20</RequestedCount>' +
+            '<SortCriteria></SortCriteria>' +
+            '</u:Browse></s:Body></s:Envelope>';
+
+        if (!window.Lampa || typeof Lampa.Reguest !== 'function') {
+            notify('SOAP-тест: Lampa.Reguest недоступен.', 'error');
+            return;
+        }
+
+        var request = new Lampa.Reguest();
+        try { if (request.timeout) request.timeout(15000); } catch (e) {}
+
+        request.native(
+            url,
+            function (raw) {
+                var responseText = typeof raw === 'string' ? raw : String(raw || '');
+                var isSoap = /Envelope/i.test(responseText) && /BrowseResponse/i.test(responseText);
+                var hasFault = /<[^>]*Fault\b/i.test(responseText) || /<faultstring>/i.test(responseText);
+                var resultMatch = responseText.match(/<(?:\w+:)?Result[^>]*>([\s\S]*?)<\/(?:\w+:)?Result>/i);
+                var resultText = resultMatch ? resultMatch[1] : '';
+                var count = (resultText.match(/<(?:\w+:)?(?:container|item)\b/gi) || []).length;
+                var message = 'SOAP POST: ' + (isSoap ? 'ответ Browse получен' : 'ответ получен, формат не распознан') +
+                    '; объектов в Result: ' + count + (hasFault ? '; SOAP Fault' : '');
+                notify(message, hasFault || !isSoap ? 'error' : 'success');
+                if (window.console && console.log) console.log('[DLNA Bridge SOAP probe]', responseText);
+                if (request.clear) request.clear();
+            },
+            function (xhr, error) {
+                var status = xhr && xhr.status ? xhr.status : 0;
+                notify('SOAP POST не выполнен. HTTP ' + status + (error ? ': ' + String(error) : ''), 'error');
+                if (window.console && console.warn) console.warn('[DLNA Bridge SOAP probe failed]', error, xhr);
+                if (request.clear) request.clear();
+            },
+            body,
+            {
+                dataType: 'text',
+                timeout: 15000,
+                headers: {
+                    'Content-Type': 'text/xml; charset="utf-8"',
+                    'SOAPAction': '"' + service + '#Browse"'
+                }
+            }
+        );
+    }
+
     function init() {
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) return;
 
@@ -180,7 +239,7 @@
             dlna_bridge_url: { ru: 'URL XML-описания устройства', en: 'Device description XML URL' },
             dlna_bridge_test: { ru: 'Проверить HTTP-доступ', en: 'Test HTTP access' },
             dlna_bridge_runtime: { ru: 'Диагностика среды', en: 'Runtime diagnostics' },
-            dlna_bridge_router_test: { ru: 'Проверить доступ к DLNA-серверу из Lampa', en: 'Test DLNA server access from Lampa' }
+            dlna_bridge_router_test: { ru: 'Проверить доступ к DLNA-серверу из Lampa', en: 'Test DLNA server access from Lampa' },\n            dlna_bridge_soap_test: { ru: 'Проверить SOAP Browse (POST)', en: 'Test SOAP Browse (POST)' }
         });
 
         Lampa.SettingsApi.addComponent({
@@ -214,6 +273,14 @@
             param: { name: PREFIX + 'router_check', type: 'trigger', default: false },
             field: { name: Lampa.Lang.translate('dlna_bridge_router_test') },
             onChange: function () { probeRouterAccess(); }
+        });
+
+
+        Lampa.SettingsApi.addParam({
+            component: COMPONENT,
+            param: { name: PREFIX + 'soap_check', type: 'trigger', default: false },
+            field: { name: Lampa.Lang.translate('dlna_bridge_soap_test') },
+            onChange: function () { probeSoapBrowse(); }
         });
 
         showDiagnostics();
