@@ -7,7 +7,7 @@
     'use strict';
 
     if (window.lampa_dlna_bridge_037) return;
-    window.lampa_dlna_bridge_035 = true;
+    window.lampa_dlna_bridge_037 = true;
 
     var COMPONENT = 'dlna_bridge';
     var PREFIX = 'dlna_bridge_';
@@ -239,7 +239,8 @@
             dlna_bridge_url: { ru: 'URL XML-описания устройства', en: 'Device description XML URL' },
             dlna_bridge_test: { ru: 'Проверить HTTP-доступ', en: 'Test HTTP access' },
             dlna_bridge_runtime: { ru: 'Диагностика среды', en: 'Runtime diagnostics' },
-            dlna_bridge_router_test: { ru: 'Проверить доступ к DLNA-серверу из Lampa', en: 'Test DLNA server access from Lampa' },\n            dlna_bridge_soap_test: { ru: 'Проверить SOAP Browse (POST)', en: 'Test SOAP Browse (POST)' }
+            dlna_bridge_router_test: { ru: 'Проверить доступ к DLNA-серверу из Lampa', en: 'Test DLNA server access from Lampa' },
+            dlna_bridge_soap_test: { ru: 'Проверить SOAP Browse (POST)', en: 'Test SOAP Browse (POST)' }
         });
 
         Lampa.SettingsApi.addComponent({
