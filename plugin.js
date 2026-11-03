@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.4.2
+/* Lampa DLNA Bridge 0.4.3
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_042';
+    var GUARD = 'lampa_dlna_bridge_043';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -181,16 +181,84 @@
     }
 
     function openSelect(title, entries, onSelect, onBack) {
-        if (!Lampa.Select || !Lampa.Select.show) {
-            notify('В этой версии Lampa не найден интерфейс Select.', 'error');
-            return;
+        var old = document.getElementById('dlna-bridge-menu');
+        if (old) old.parentNode.removeChild(old);
+
+        var overlay = document.createElement('div');
+        overlay.id = 'dlna-bridge-menu';
+        overlay.style.cssText = 'position:fixed;z-index:999999;inset:0;background:rgba(0,0,0,.94);color:#fff;padding:5vh 6vw;box-sizing:border-box;font-family:Arial,sans-serif;overflow:auto;';
+        var heading = document.createElement('div');
+        heading.textContent = title;
+        heading.style.cssText = 'font-size:26px;font-weight:bold;margin:0 0 22px;';
+        overlay.appendChild(heading);
+
+        var list = document.createElement('div');
+        list.style.cssText = 'max-width:1000px;margin:auto;';
+        overlay.appendChild(list);
+
+        var buttons = [];
+        function close() {
+            document.removeEventListener('keydown', keyHandler, true);
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
         }
-        Lampa.Select.show({
-            title: title,
-            items: entries,
-            onSelect: onSelect,
-            onBack: onBack || function () {}
+        function choose(index) {
+            if (index < 0 || index >= entries.length) return;
+            var selected = entries[index];
+            close();
+            onSelect(selected);
+        }
+        function keyHandler(event) {
+            var key = event.key || '';
+            var code = event.keyCode || event.which;
+            if (key === 'Escape' || key === 'Backspace' || code === 4 || code === 4) {
+                event.preventDefault();
+                event.stopPropagation();
+                close();
+                if (onBack) onBack();
+            } else if (key === 'ArrowDown' || code === 40) {
+                event.preventDefault();
+                focusIndex(Math.min(buttons.length - 1, active + 1));
+            } else if (key === 'ArrowUp' || code === 38) {
+                event.preventDefault();
+                focusIndex(Math.max(0, active - 1));
+            } else if (key === 'Enter' || code === 13 || code === 23) {
+                event.preventDefault();
+                choose(active);
+            }
+        }
+        var active = 0;
+        function focusIndex(index) {
+            if (!buttons.length) return;
+            active = index;
+            buttons.forEach(function (button, i) {
+                button.style.background = i === active ? '#315b86' : 'rgba(255,255,255,.08)';
+                button.style.outline = i === active ? '2px solid #8fc7ff' : 'none';
+            });
+            buttons[active].focus();
+            buttons[active].scrollIntoView({ block: 'nearest' });
+        }
+
+        entries.forEach(function (entry, index) {
+            var button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = (entry.entry && entry.entry.isFolder || entry.isFolder ? '📁  ' : '▶  ') +
+                (entry.title || (entry.entry && entry.entry.title) || 'Без названия') +
+                (entry.subtitle ? '    ' + entry.subtitle : '');
+            button.style.cssText = 'display:block;width:100%;text-align:left;color:#fff;background:rgba(255,255,255,.08);border:0;border-radius:7px;padding:17px 20px;margin:8px 0;font-size:20px;';
+            button.addEventListener('click', function () { choose(index); });
+            button.addEventListener('focus', function () { active = index; });
+            list.appendChild(button);
+            buttons.push(button);
         });
+
+        if (!entries.length) {
+            var empty = document.createElement('div');
+            empty.textContent = 'Папка пуста';
+            list.appendChild(empty);
+        }
+        document.body.appendChild(overlay);
+        document.addEventListener('keydown', keyHandler, true);
+        focusIndex(0);
     }
 
     function formatSize(bytes) {
@@ -236,8 +304,7 @@
                 return {
                     title: entry.title,
                     subtitle: subtitle,
-                    template: 'select',
-                    entry: entry
+                            entry: entry
                 };
             });
             openSelect(title, rows, function (selected) {
@@ -261,7 +328,7 @@
     function init() {
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) return;
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.2', en: 'DLNA Bridge 0.4.2' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.3', en: 'DLNA Bridge 0.4.2' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -269,7 +336,7 @@
         });
         Lampa.SettingsApi.addComponent({
             component: COMPONENT,
-            name: 'DLNA Bridge 0.4.2',
+            name: 'DLNA Bridge 0.4.3',
             icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
         });
         Lampa.SettingsApi.addParam({
