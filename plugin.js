@@ -235,7 +235,7 @@
             // and remove the menu before starting navigation or playback.
             setTimeout(function () {
                 onSelect(selected);
-            }, 220);
+            }, 600);
         }
         function keyHandler(event) {
             var key = event.key || '';
