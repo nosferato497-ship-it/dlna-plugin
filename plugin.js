@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.5.1
+/* Lampa DLNA Bridge 0.5.2
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_051';
+    var GUARD = 'lampa_dlna_bridge_052';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -216,6 +216,16 @@
         overlay.appendChild(list);
 
         var buttons = [];
+        var diagnostic = document.createElement('div');
+        diagnostic.textContent = 'Диагностика пульта: ожидаю нажатия кнопки…';
+        diagnostic.style.cssText = 'position:fixed;left:6vw;right:6vw;bottom:16px;font-size:14px;color:#ffd27a;opacity:.95;';
+        overlay.appendChild(diagnostic);
+        function showKeyEvent(type, event) {
+            var key = event.key || '(пусто)';
+            var code = event.keyCode || 0;
+            var which = event.which || 0;
+            diagnostic.textContent = 'Пульт ' + type + ': key=' + key + ', keyCode=' + code + ', which=' + which;
+        }
         function close() {
             window.removeEventListener('keydown', keyHandler, true);
             window.removeEventListener('keyup', keyUpHandler, true);
@@ -250,9 +260,11 @@
             if (event.stopImmediatePropagation) event.stopImmediatePropagation();
         }
         function keyUpHandler(event) {
+            showKeyEvent('keyup', event);
             if (isBackKey(event)) swallow(event);
         }
         function keyHandler(event) {
+            showKeyEvent('keydown', event);
             var key = event.key || '';
             var code = event.keyCode || event.which;
             if (isBackKey(event)) {
