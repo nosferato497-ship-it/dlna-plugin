@@ -7,7 +7,7 @@
     'use strict';
 
     if (window.lampa_dlna_bridge_034) return;
-    window.lampa_dlna_bridge_033 = true;
+    window.lampa_dlna_bridge_034 = true;
 
     var COMPONENT = 'dlna_bridge';
     var PREFIX = 'dlna_bridge_';
@@ -90,7 +90,7 @@
             var hasContentDirectory = /ContentDirectory/i.test(responseText);
             var summary = 'HTTP-ответ получен; XML: ' + (isXml ? 'похоже на XML' : 'не распознан') +
                 '; AVTransport: ' + (hasAvTransport ? 'есть' : 'нет') +
-                '; ContentDirectory: ' + (hasContentDirectory ? 'есть' : 'нет') +\n                '; Адрес: ' + url;
+                '; ContentDirectory: ' + (hasContentDirectory ? 'есть' : 'нет');
             notify(summary, 'success');
             if (window.console && console.log) console.log('[DLNA Bridge description]', responseText);
             if (request.clear) request.clear();
