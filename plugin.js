@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.4.8
+/* Lampa DLNA Bridge 0.4.9
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_048';
+    var GUARD = 'lampa_dlna_bridge_049';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -211,6 +211,12 @@
         heading.style.cssText = 'font-size:26px;font-weight:bold;margin:0 0 22px;';
         overlay.appendChild(heading);
 
+        var backButton = document.createElement('button');
+        backButton.type = 'button';
+        backButton.textContent = '← Назад к плагину';
+        backButton.style.cssText = 'display:block;color:#fff;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.35);border-radius:7px;padding:12px 18px;margin:0 0 18px;font-size:18px;';
+        overlay.appendChild(backButton);
+
         var list = document.createElement('div');
         list.style.cssText = 'max-width:1000px;margin:auto;';
         overlay.appendChild(list);
@@ -240,7 +246,7 @@
         function keyHandler(event) {
             var key = event.key || '';
             var code = event.keyCode || event.which;
-            if (key === 'Escape' || key === 'Backspace' || code === 4 || code === 4) {
+            if (key === 'Escape' || key === 'Backspace' || key === 'BrowserBack' || key === 'GoBack' || code === 4 || code === 8 || code === 27 || code === 111) {
                 event.preventDefault();
                 event.stopPropagation();
                 close();
@@ -375,7 +381,7 @@
             });
         }
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.8', en: 'DLNA Bridge 0.4.8' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.9', en: 'DLNA Bridge 0.4.9' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -383,7 +389,7 @@
         });
         Lampa.SettingsApi.addComponent({
             component: COMPONENT,
-            name: 'DLNA Bridge 0.4.8',
+            name: 'DLNA Bridge 0.4.9',
             icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
         });
         Lampa.SettingsApi.addParam({
