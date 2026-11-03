@@ -340,7 +340,7 @@
     function init() {
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.Storage) return;
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.3', en: 'DLNA Bridge 0.4.2' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.4.5', en: 'DLNA Bridge 0.4.5' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
