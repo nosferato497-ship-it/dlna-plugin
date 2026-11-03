@@ -107,7 +107,7 @@
         var base = 'http://192.168.1.1:8200';
         var paths = ['/rootDesc.xml', '/ContentDir.xml'];
         var results = [];
-        var pending = paths.length * 2;
+        var pending = paths.length * 3;
 
         function done(label, message) {
             results.push(label + ': ' + message);
@@ -124,7 +124,6 @@
             if (typeof window.fetch === 'function') {
                 window.fetch(url, { method: 'GET' }).then(function (response) {
                     done('Fetch ' + path, 'HTTP ' + response.status + (response.ok ? ', доступ есть' : ', ошибка HTTP'));
-                    return response.text();
                 }).catch(function (error) {
                     done('Fetch ' + path, 'ошибка сети/CORS: ' + (error && error.message ? error.message : String(error)));
                 });
@@ -134,18 +133,40 @@
 
             if (typeof window.XMLHttpRequest === 'function') {
                 var xhr = new XMLHttpRequest();
+                var xhrDone = false;
+                function finishXhr(message) {
+                    if (xhrDone) return;
+                    xhrDone = true;
+                    done('XHR ' + path, message);
+                }
                 xhr.open('GET', url, true);
                 xhr.timeout = 8000;
                 xhr.onreadystatechange = function () {
                     if (xhr.readyState === 4) {
-                        done('XHR ' + path, 'HTTP ' + xhr.status + (xhr.status >= 200 && xhr.status < 300 ? ', доступ есть' : ', ответ/ошибка'));
+                        finishXhr('HTTP ' + xhr.status + (xhr.status >= 200 && xhr.status < 300 ? ', доступ есть' : ', ответ/ошибка'));
                     }
                 };
-                xhr.onerror = function () { done('XHR ' + path, 'ошибка сети/CORS'); };
-                xhr.ontimeout = function () { done('XHR ' + path, 'тайм-аут'); };
-                try { xhr.send(); } catch (e) { done('XHR ' + path, 'ошибка: ' + e.message); }
+                xhr.onerror = function () { finishXhr('ошибка сети/CORS'); };
+                xhr.ontimeout = function () { finishXhr('тайм-аут'); };
+                try { xhr.send(); } catch (e) { finishXhr('ошибка: ' + e.message); }
             } else {
                 done('XHR ' + path, 'API отсутствует');
+            }
+
+            if (window.Lampa && Lampa.Reguest) {
+                var request = new Lampa.Reguest();
+                if (request.timeout) request.timeout(10000);
+                request.native(url, function (raw) {
+                    var text = typeof raw === 'string' ? raw : String(raw || '');
+                    done('Lampa Reguest.native ' + path, text.length ? 'ответ получен (' + text.length + ' символов)' : 'пустой ответ');
+                    if (request.clear) request.clear();
+                }, function (xhr, error) {
+                    var status = xhr && xhr.status ? xhr.status : 0;
+                    done('Lampa Reguest.native ' + path, 'ошибка, HTTP ' + status + (error ? ': ' + String(error) : ''));
+                    if (request.clear) request.clear();
+                }, null, { dataType: 'text', timeout: 10000 });
+            } else {
+                done('Lampa Reguest.native ' + path, 'API отсутствует');
             }
         });
     }
