@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.5.5
+/* Lampa DLNA Bridge 0.5.6
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_055';
+    var GUARD = 'lampa_dlna_bridge_056';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -117,6 +117,101 @@
         if (window.Lampa && Lampa.Noty && Lampa.Noty.show) {
             Lampa.Noty.show(message, { style: style || 'default', time: 7000 });
         } else if (window.console) console.log('[DLNA Bridge] ' + message);
+    }
+
+    function androidBridgeType(value) {
+        if (value === null) return 'null';
+        return typeof value;
+    }
+
+    function androidBridgePropertySummary(target, limit) {
+        var names;
+        var result = [];
+        try {
+            names = Object.getOwnPropertyNames(target);
+        } catch (error) {
+            return '[ошибка перечисления: ' + errorText(error) + ']';
+        }
+        var count = Math.min(names.length, limit);
+        for (var i = 0; i < count; i++) {
+            var name = String(names[i]);
+            if (name.length > 48) name = name.slice(0, 45) + '...';
+            try {
+                var descriptor = Object.getOwnPropertyDescriptor(target, names[i]);
+                if (!descriptor) result.push(name + ': недоступно');
+                else if (Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+                    result.push(name + ': ' + androidBridgeType(descriptor.value));
+                } else result.push(name + ': accessor (не прочитан)');
+            } catch (error) {
+                result.push(name + ': ошибка дескриптора');
+            }
+        }
+        if (names.length > count) result.push('... ещё свойств: ' + (names.length - count));
+        return result.join(', ');
+    }
+
+    function androidBridgeGlobalDescriptor(name) {
+        var target = window;
+        for (var depth = 0; target && depth < 6; depth++) {
+            try {
+                var descriptor = Object.getOwnPropertyDescriptor(target, name);
+                if (descriptor) return descriptor;
+                target = Object.getPrototypeOf(target);
+            } catch (error) {
+                return { inspectionError: error };
+            }
+        }
+        return null;
+    }
+
+    function androidBridgeObjectSummary(name, value) {
+        var lines = [name + ' (' + androidBridgeType(value) + ')'];
+        lines.push('  свойства: ' + androidBridgePropertySummary(value, 12));
+        var prototype = value;
+        for (var depth = 1; depth <= 2; depth++) {
+            try {
+                prototype = Object.getPrototypeOf(prototype);
+            } catch (error) {
+                lines.push('  прототип ' + depth + ': ошибка: ' + errorText(error));
+                break;
+            }
+            if (!prototype) {
+                lines.push('  прототип ' + depth + ': null');
+                break;
+            }
+            lines.push('  прототип ' + depth + ' (' + androidBridgeType(prototype) + '): ' +
+                androidBridgePropertySummary(prototype, 8));
+        }
+        return lines.join('\n');
+    }
+
+    function diagnoseAndroidBridges() {
+        var names = ['AndroidJS', 'androidJS', 'Android', 'AndroidBridge', 'WebViewBridge', 'JSInterface'];
+        var lines = ['AndroidJS bridge diagnostics (только чтение дескрипторов)'];
+        for (var i = 0; i < names.length; i++) {
+            var descriptor = androidBridgeGlobalDescriptor(names[i]);
+            if (!descriptor) {
+                lines.push(names[i] + ': отсутствует');
+            } else if (descriptor.inspectionError) {
+                lines.push(names[i] + ': ошибка доступа к дескриптору: ' + errorText(descriptor.inspectionError));
+            } else if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+                lines.push(names[i] + ': accessor глобального свойства (не прочитан)');
+            } else if (descriptor.value === undefined) {
+                lines.push(names[i] + ': undefined');
+            } else if (descriptor.value === null) {
+                lines.push(names[i] + ': null');
+            } else {
+                try {
+                    lines.push(androidBridgeObjectSummary(names[i], descriptor.value));
+                } catch (error) {
+                    lines.push(names[i] + ': ошибка инспекции: ' + errorText(error));
+                }
+            }
+        }
+        var report = lines.join('\n');
+        if (report.length > 3000) report = report.slice(0, 2980) + '\n... отчёт сокращён';
+        notify(report, 'default');
+        return report;
     }
 
     function setting(name, fallback) {
@@ -617,10 +712,11 @@
             });
         }
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.5.5', en: 'DLNA Bridge 0.5.5' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.5.6', en: 'DLNA Bridge 0.5.6' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
+            dlna_bridge_androidjs: { ru: 'Проверить AndroidJS', en: 'Inspect AndroidJS' },
             dlna_bridge_about: { ru: 'MiniDLNA: SOAP Browse через Lampa.Reguest.native. SSDP discovery пока не реализован.', en: 'MiniDLNA SOAP Browse via Lampa.Reguest.native. SSDP discovery is not implemented yet.' }
         });
         Lampa.SettingsApi.addComponent({
@@ -644,6 +740,12 @@
             param: { name: PREFIX + 'clear_cache', type: 'trigger', default: false },
             field: { name: Lampa.Lang.translate('dlna_bridge_clear') },
             onChange: function () { cache = {}; notify('Кеш каталога очищен.', 'success'); }
+        });
+        Lampa.SettingsApi.addParam({
+            component: COMPONENT,
+            param: { name: PREFIX + 'androidjs_diag', type: 'trigger', default: false },
+            field: { name: Lampa.Lang.translate('dlna_bridge_androidjs') },
+            onChange: function () { diagnoseAndroidBridges(); }
         });
     }
 
