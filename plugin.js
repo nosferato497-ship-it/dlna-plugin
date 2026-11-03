@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.5.2
+/* Lampa DLNA Bridge 0.5.3
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_052';
+    var GUARD = 'lampa_dlna_bridge_053';
     if (window[GUARD]) return;
     window[GUARD] = true;
 
@@ -19,6 +19,91 @@
     var currentRequest = null;
     var activeMenuClose = null;
     var playerCloseBound = false;
+    var keypadBackHandlerAttached = false;
+    var keypadBackHandlerActive = false;
+    var keypadBackListener = null;
+    var keypadBackDiagnostic = 'Lampa.Keypad back: событие ещё не получено';
+    var keypadApiDiagnostic = 'Lampa API: проверка ещё не выполнена';
+    var domKeyDiagnostic = 'DOM-пульт: ожидаю нажатия кнопки…';
+    var backDiagnosticElement = null;
+
+    function renderBackDiagnostics() {
+        if (backDiagnosticElement) {
+            backDiagnosticElement.textContent = keypadApiDiagnostic + '\n' + keypadBackDiagnostic + '\n' + domKeyDiagnostic;
+        }
+    }
+
+    function keypadBackHandler(event) {
+        if (!keypadBackHandlerActive) return;
+        var data = event || {};
+        var source = data.event || null;
+        var code = data.code === undefined || data.code === null ? '(нет)' : data.code;
+        var keyCode = source && source.keyCode !== undefined ? source.keyCode :
+            (data.keyCode !== undefined ? data.keyCode : '(нет)');
+        var controllerName = '(недоступен)';
+        try {
+            if (window.Lampa && Lampa.Controller && typeof Lampa.Controller.enabled === 'function') {
+                var activeController = Lampa.Controller.enabled();
+                if (activeController && activeController.name) controllerName = activeController.name;
+            }
+        } catch (e) {}
+        keypadBackDiagnostic = 'Lampa.Keypad back: получено; code=' + code +
+            '; keyCode=' + keyCode + '; DOM=' + (source ? 'да' : 'нет') +
+            '; controller=' + controllerName;
+        renderBackDiagnostics();
+    }
+
+    function checkKeypadApi() {
+        var keypad = window.Lampa && Lampa.Keypad;
+        var listener = keypad && keypad.listener;
+        var controller = window.Lampa && Lampa.Controller;
+        var status = [
+            'Keypad=' + (keypad ? 'да' : 'нет'),
+            'Keypad.listener=' + (listener ? 'да' : 'нет'),
+            'listener.follow=' + (listener && typeof listener.follow === 'function' ? 'да' : 'нет'),
+            'Controller=' + (controller ? 'да' : 'нет'),
+            'Controller.add=' + (controller && typeof controller.add === 'function' ? 'да' : 'нет'),
+            'toggle=' + (controller && typeof controller.toggle === 'function' ? 'да' : 'нет'),
+            'enabled=' + (controller && typeof controller.enabled === 'function' ? 'да' : 'нет'),
+            'back=' + (controller && typeof controller.back === 'function' ? 'да' : 'нет')
+        ];
+        keypadApiDiagnostic = 'Lampa API: ' + status.join(' | ');
+        keypadBackListener = listener || null;
+        renderBackDiagnostics();
+    }
+
+    function activateKeypadBackDiagnostic() {
+        checkKeypadApi();
+        if (!keypadBackListener || typeof keypadBackListener.follow !== 'function') return;
+        keypadBackHandlerActive = true;
+        if (keypadBackHandlerAttached) return;
+        // Set first to avoid duplicate subscriptions if a nonstandard follow() throws after adding.
+        keypadBackHandlerAttached = true;
+        try {
+            keypadBackListener.follow('back', keypadBackHandler);
+        } catch (e) {
+            keypadBackDiagnostic = 'Lampa.Keypad back: ошибка подписки: ' + errorText(e);
+            keypadBackHandlerActive = false;
+            if (typeof keypadBackListener.remove === 'function') {
+                try {
+                    keypadBackListener.remove('back', keypadBackHandler);
+                    keypadBackHandlerAttached = false;
+                } catch (removeError) {}
+            }
+            renderBackDiagnostics();
+        }
+    }
+
+    function deactivateKeypadBackDiagnostic() {
+        keypadBackHandlerActive = false;
+        if (keypadBackHandlerAttached && keypadBackListener && typeof keypadBackListener.remove === 'function') {
+            try {
+                keypadBackListener.remove('back', keypadBackHandler);
+                keypadBackHandlerAttached = false;
+            } catch (e) {}
+        }
+        backDiagnosticElement = null;
+    }
 
     function errorText(error) {
         if (error === null || error === undefined) return 'неизвестная ошибка (пустой ответ обработчика)';
@@ -201,11 +286,14 @@
 
     function openSelect(title, entries, onSelect, onBack) {
         var old = document.getElementById('dlna-bridge-menu');
-        if (old) old.parentNode.removeChild(old);
+        if (old) {
+            if (activeMenuClose) activeMenuClose();
+            if (old.parentNode) old.parentNode.removeChild(old);
+        }
 
         var overlay = document.createElement('div');
         overlay.id = 'dlna-bridge-menu';
-        overlay.style.cssText = 'position:fixed;z-index:1000;inset:0;background:rgba(0,0,0,.94);color:#fff;padding:5vh 6vw;box-sizing:border-box;font-family:Arial,sans-serif;overflow:auto;';
+        overlay.style.cssText = 'position:fixed;z-index:1000;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.94);color:#fff;padding:5vh 6vw;box-sizing:border-box;font-family:Arial,sans-serif;overflow:auto;';
         var heading = document.createElement('div');
         heading.textContent = title;
         heading.style.cssText = 'font-size:26px;font-weight:bold;margin:0 0 22px;';
@@ -217,18 +305,21 @@
 
         var buttons = [];
         var diagnostic = document.createElement('div');
-        diagnostic.textContent = 'Диагностика пульта: ожидаю нажатия кнопки…';
-        diagnostic.style.cssText = 'position:fixed;left:6vw;right:6vw;bottom:16px;font-size:14px;color:#ffd27a;opacity:.95;';
+        diagnostic.style.cssText = 'position:fixed;left:6vw;right:6vw;bottom:16px;max-height:22vh;overflow:auto;white-space:pre-wrap;font-size:14px;color:#ffd27a;opacity:.95;';
         overlay.appendChild(diagnostic);
+        backDiagnosticElement = diagnostic;
+        renderBackDiagnostics();
         function showKeyEvent(type, event) {
             var key = event.key || '(пусто)';
             var code = event.keyCode || 0;
             var which = event.which || 0;
-            diagnostic.textContent = 'Пульт ' + type + ': key=' + key + ', keyCode=' + code + ', which=' + which;
+            domKeyDiagnostic = 'DOM-пульт ' + type + ': key=' + key + ', keyCode=' + code + ', which=' + which;
+            renderBackDiagnostics();
         }
         function close() {
             window.removeEventListener('keydown', keyHandler, true);
             window.removeEventListener('keyup', keyUpHandler, true);
+            deactivateKeypadBackDiagnostic();
             overlay.style.display = 'none';
             overlay.style.visibility = 'hidden';
             overlay.style.pointerEvents = 'none';
@@ -315,6 +406,7 @@
         document.body.appendChild(overlay);
         window.addEventListener('keydown', keyHandler, true);
         window.addEventListener('keyup', keyUpHandler, true);
+        activateKeypadBackDiagnostic();
         focusIndex(0);
     }
 
@@ -401,7 +493,7 @@
             });
         }
         Lampa.Lang.add({
-            dlna_bridge_title: { ru: 'DLNA Bridge 0.5.1', en: 'DLNA Bridge 0.5.1' },
+            dlna_bridge_title: { ru: 'DLNA Bridge 0.5.3', en: 'DLNA Bridge 0.5.3' },
             dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
             dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
             dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -409,7 +501,7 @@
         });
         Lampa.SettingsApi.addComponent({
             component: COMPONENT,
-            name: 'DLNA Bridge 0.5.1',
+            name: 'DLNA Bridge 0.5.3',
             icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
         });
         Lampa.SettingsApi.addParam({
