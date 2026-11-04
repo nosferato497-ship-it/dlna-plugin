@@ -9,7 +9,7 @@
 | Версия | Ссылка | Статус |
 |---|---|---|
 | **0.5.5** | `https://nosferato497-ship-it.github.io/dlna-plugin/plugin.js` | основная (базовая) версия |
-| 0.5.9 | `https://nosferato497-ship-it.github.io/dlna-plugin/v059/plugin.js` | тестовая, последняя |
+| 0.5.9 | `https://nosferato497-ship-it.github.io/dlna-plugin/v059/plugin.js` | тестовая, последняя; ✅ проверена на Mi Box S 4K (см. ниже) |
 | 0.5.8 | `https://nosferato497-ship-it.github.io/dlna-plugin/v058/plugin.js` | тестовая |
 | 0.5.7 | `https://nosferato497-ship-it.github.io/dlna-plugin/v057/plugin.js` | тестовая |
 | 0.5.6 | `https://nosferato497-ship-it.github.io/dlna-plugin/v056/plugin.js` | тестовая |
@@ -45,7 +45,15 @@
 | Передача воспроизведения на Renderer и управление | ☐ | — |
 | Выбор дорожек и субтитров на конкретных Renderer | ☐ | — |
 
-Итог: сценарий **MediaServer** (просмотр каталога и воспроизведение в Lampa) реализован; сценарий **MediaRenderer** ещё не начат.
+Итог: сценарий **MediaServer** (просмотр каталога и воспроизведение в Lampa) реализован и подтверждён на устройстве; сценарий **MediaRenderer** ещё не начат.
+
+## Проверка на устройствах
+
+| Дата | Версия | Устройство | Lampa | Сервер | Результат |
+|---|---|---|---|---|---|
+| 2026-11-04 | 0.5.9 | Xiaomi Mi Box S 4K, Android 14 | 1.13.5-581, APK из официального репозитория | MiniDLNA на роутере Netcraze Ultra | ✅ каталог, папки, Back, запуск видео, возврат фокуса после плеера; ошибок нет |
+
+Пока не проверено на устройстве: выбор из нескольких ресурсов и скрытие субтитров/миниатюр MiniDLNA (нужно видео с `.srt` рядом).
 
 ## Что умеет плагин
 
