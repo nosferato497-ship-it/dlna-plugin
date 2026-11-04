@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.5.6
+/* Lampa DLNA Bridge 0.5.8
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_056';
+    var GUARD = 'lampa_dlna_bridge_058';
     var initialGuard = window[GUARD];
     var guardState = initialGuard && typeof initialGuard === 'object' ? initialGuard : {};
     if (guardState && (guardState.initialized || guardState.initializing)) return;
@@ -25,6 +25,7 @@
     var MAX_ITEMS = 5000;
     var cache = {};
     var currentRequest = null;
+    var browseToken = 0;
     var activeMenuClose = null;
     var playerReturnController = null;
     var keypadBackHandlerAttached = false;
@@ -179,7 +180,7 @@
         try {
             Lampa.SettingsApi.addComponent({
                 component: COMPONENT,
-                name: 'DLNA Bridge 0.5.6',
+                name: 'DLNA Bridge 0.5.8',
                 icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
             });
             setRegistrationState(name, 'registered');
@@ -234,7 +235,7 @@
         }
         try {
             Lampa.Lang.add({
-                dlna_bridge_title: { ru: 'DLNA Bridge 0.5.6', en: 'DLNA Bridge 0.5.6' },
+                dlna_bridge_title: { ru: 'DLNA Bridge 0.5.8', en: 'DLNA Bridge 0.5.8' },
                 dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
                 dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
                 dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -284,7 +285,7 @@
         try {
             names = Object.getOwnPropertyNames(target);
         } catch (error) {
-            return '[ошибка перечисления: ' + errorText(error) + ']';
+            return '[ошибка перечисления свойств]';
         }
         var count = Math.min(names.length, limit);
         for (var i = 0; i < count; i++) {
@@ -318,15 +319,69 @@
         return null;
     }
 
+    function androidBridgeMethodDescriptor(target, name) {
+        for (var depth = 0; target && depth <= 2; depth++) {
+            try {
+                var descriptor = Object.getOwnPropertyDescriptor(target, name);
+                if (descriptor) return { descriptor: descriptor, depth: depth };
+                target = Object.getPrototypeOf(target);
+            } catch (error) {
+                return { inspectionError: error };
+            }
+        }
+        return null;
+    }
+
+    function androidBridgeMethodSummary(target) {
+        var names = ['httpReq', 'get', 'getResp', 'dump'];
+        var lines = ['  API methods:'];
+        for (var i = 0; i < names.length; i++) {
+            var name = names[i];
+            var found = androidBridgeMethodDescriptor(target, name);
+            if (!found) {
+                lines.push('    ' + name + ': absent; type=undefined; length=unavailable; source=unavailable');
+            } else if (found.inspectionError) {
+                lines.push('    ' + name + ': inspection error (details omitted)');
+            } else if (!Object.prototype.hasOwnProperty.call(found.descriptor, 'value')) {
+                lines.push('    ' + name + ': present; type=accessor (not read); length=unavailable; source=unavailable');
+            } else {
+                var method = found.descriptor.value;
+                var methodType = androidBridgeType(method);
+                if (methodType !== 'function') {
+                    lines.push('    ' + name + ': present; type=' + methodType + '; length=unavailable; source=unavailable');
+                } else {
+                    var length = 'unavailable';
+                    var source = 'unavailable';
+                    try {
+                        var lengthDescriptor = Object.getOwnPropertyDescriptor(method, 'length');
+                        if (lengthDescriptor && Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value') &&
+                            typeof lengthDescriptor.value === 'number') {
+                            length = String(lengthDescriptor.value);
+                        }
+                    } catch (lengthError) {}
+                    try {
+                        var methodSource = Function.prototype.toString.call(method);
+                        if (typeof methodSource === 'string') {
+                            source = methodSource.length > 180 ? methodSource.slice(0, 177) + '...' : methodSource;
+                        }
+                    } catch (sourceError) {}
+                    lines.push('    ' + name + ': present; type=function; length=' + length + '; source=' + source);
+                }
+            }
+        }
+        return lines.join('\n');
+    }
+
     function androidBridgeObjectSummary(name, value) {
         var lines = [name + ' (' + androidBridgeType(value) + ')'];
         lines.push('  свойства: ' + androidBridgePropertySummary(value, 12));
+        if (name === 'AndroidJS' || name === 'androidJS') lines.push(androidBridgeMethodSummary(value));
         var prototype = value;
         for (var depth = 1; depth <= 2; depth++) {
             try {
                 prototype = Object.getPrototypeOf(prototype);
             } catch (error) {
-                lines.push('  прототип ' + depth + ': ошибка: ' + errorText(error));
+                lines.push('  прототип ' + depth + ': ошибка получения прототипа');
                 break;
             }
             if (!prototype) {
@@ -346,19 +401,22 @@
             var descriptor = androidBridgeGlobalDescriptor(names[i]);
             if (!descriptor) {
                 lines.push(names[i] + ': отсутствует');
+                if (names[i] === 'AndroidJS' || names[i] === 'androidJS') lines.push(androidBridgeMethodSummary(null));
             } else if (descriptor.inspectionError) {
-                lines.push(names[i] + ': ошибка доступа к дескриптору: ' + errorText(descriptor.inspectionError));
+                lines.push(names[i] + ': ошибка доступа к дескриптору (подробности опущены)');
             } else if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
                 lines.push(names[i] + ': accessor глобального свойства (не прочитан)');
             } else if (descriptor.value === undefined) {
                 lines.push(names[i] + ': undefined');
+                if (names[i] === 'AndroidJS' || names[i] === 'androidJS') lines.push(androidBridgeMethodSummary(null));
             } else if (descriptor.value === null) {
                 lines.push(names[i] + ': null');
+                if (names[i] === 'AndroidJS' || names[i] === 'androidJS') lines.push(androidBridgeMethodSummary(null));
             } else {
                 try {
                     lines.push(androidBridgeObjectSummary(names[i], descriptor.value));
                 } catch (error) {
-                    lines.push(names[i] + ': ошибка инспекции: ' + errorText(error));
+                    lines.push(names[i] + ': ошибка инспекции (подробности опущены)');
                 }
             }
         }
@@ -380,26 +438,55 @@
     }
 
     function requestNative(url, body, headers, success, failure) {
-        if (!Lampa.Reguest) {
-            failure(new Error('Lampa.Reguest недоступен'));
-            return;
+        var req = null;
+        var settled = false;
+
+        function clearRequest() {
+            if (currentRequest === req) currentRequest = null;
+            try { if (req && req.clear) req.clear(); } catch (clearError) {}
         }
-        var req = new Lampa.Reguest();
-        currentRequest = req;
-        try { if (req.timeout) req.timeout(20000); } catch (e) {}
-        req.native(url, function (raw) {
-            if (currentRequest === req) currentRequest = null;
-            if (req.clear) req.clear();
-            success(typeof raw === 'string' ? raw : String(raw || ''));
-        }, function (xhr, error) {
-            if (currentRequest === req) currentRequest = null;
-            if (req.clear) req.clear();
-            failure(new Error((xhr && xhr.status ? 'HTTP ' + xhr.status + ': ' : '') + (errorText(error) || 'ошибка запроса')));
-        }, body || null, {
-            dataType: 'text',
-            timeout: 20000,
-            headers: headers || {}
-        });
+
+        function failRequest(xhr, error) {
+            if (settled) return;
+            settled = true;
+            clearRequest();
+            if (xhr && xhr.status) {
+                failure(new Error('HTTP ' + xhr.status + ': ' + errorText(error)));
+            } else {
+                failure(error instanceof Error ? error : new Error(errorText(error || xhr)));
+            }
+        }
+
+        function completeRequest(raw) {
+            if (settled) return;
+            var response;
+            try {
+                response = typeof raw === 'string' ? raw : String(raw || '');
+            } catch (responseError) {
+                failRequest(null, responseError);
+                return;
+            }
+            settled = true;
+            clearRequest();
+            success(response);
+        }
+
+        try {
+            if (!Lampa.Reguest) {
+                failRequest(null, new Error('Lampa.Reguest недоступен'));
+                return;
+            }
+            req = new Lampa.Reguest();
+            currentRequest = req;
+            try { if (req.timeout) req.timeout(20000); } catch (timeoutError) {}
+            req.native(url, completeRequest, failRequest, body || null, {
+                dataType: 'text',
+                timeout: 20000,
+                headers: headers || {}
+            });
+        } catch (requestError) {
+            failRequest(null, requestError);
+        }
     }
 
     function xmlEscape(value) {
@@ -430,10 +517,12 @@
         var doc = parseXml('<root>' + encoded + '</root>');
         var nodes = doc.getElementsByTagName('*');
         var items = [];
+        var returnedCount = 0;
         for (var i = 0; i < nodes.length; i++) {
             var node = nodes[i];
             var kind = node.localName || node.nodeName.split(':').pop();
             if (kind !== 'container' && kind !== 'item') continue;
+            returnedCount++;
             var entry = {
                 id: node.getAttribute('id') || '',
                 parentID: node.getAttribute('parentID') || '',
@@ -462,10 +551,11 @@
             entry.mime = p.length > 2 ? p[2] : '';
             if (entry.title) items.push(entry);
         }
+        items.returnedCount = returnedCount;
         return items;
     }
 
-    function soapBrowse(objectId, start, count, success, failure) {
+    function soapBrowse(objectId, start, count, success, failure, isCurrent) {
         var body = '<?xml version="1.0" encoding="utf-8"?>' +
             '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' +
             '<s:Body><u:Browse xmlns:u="' + SERVICE + '">' +
@@ -477,6 +567,11 @@
             'Content-Type': 'text/xml; charset="utf-8"',
             'SOAPAction': '"' + SERVICE + '#Browse"'
         }, function (raw) {
+            if (isCurrent && !isCurrent()) return;
+            var items;
+            var total;
+            var update;
+            var hasUpdate;
             try {
                 var doc = parseXml(raw);
                 var faults = doc.getElementsByTagName('Fault');
@@ -489,45 +584,131 @@
                         if (all[i].localName === 'Result') { result = all[i].textContent || ''; break; }
                     }
                 } else result = resultNodes[0].textContent || '';
-                var total = parseInt(textOf(doc.documentElement, 'TotalMatches') || '0', 10);
-                var update = textOf(doc.documentElement, 'UpdateID') || '';
-                success(decodeDidl(result), total, update);
+                var totalText = textOf(doc.documentElement, 'TotalMatches');
+                if (typeof totalText !== 'string' || !/^\s*\d+\s*$/.test(totalText)) {
+                    throw new Error('Некорректный или отсутствующий TotalMatches');
+                }
+                total = Number(totalText);
+                if (!isFinite(total) || total < 0 || Math.floor(total) !== total || total > 9007199254740991) {
+                    throw new Error('Некорректный или слишком большой TotalMatches');
+                }
+                var updateNodes = doc.getElementsByTagName('UpdateID');
+                if (!updateNodes.length) {
+                    var updateAll = doc.getElementsByTagName('*');
+                    for (var updateIndex = 0; updateIndex < updateAll.length; updateIndex++) {
+                        var updateName = updateAll[updateIndex].localName || updateAll[updateIndex].nodeName.split(':').pop();
+                        if (updateName === 'UpdateID') {
+                            updateNodes = [updateAll[updateIndex]];
+                            break;
+                        }
+                    }
+                }
+                hasUpdate = !!updateNodes.length;
+                update = null;
+                if (hasUpdate) {
+                    var updateText = updateNodes[0].textContent;
+                    if (typeof updateText !== 'string' || !/^\s*\d+\s*$/.test(updateText)) {
+                        var invalidUpdateError = new Error('Некорректный UpdateID');
+                        invalidUpdateError.noRetry = true;
+                        throw invalidUpdateError;
+                    }
+                    update = Number(updateText);
+                    if (!isFinite(update) || update < 0 || Math.floor(update) !== update || update > 4294967295) {
+                        var rangeUpdateError = new Error('Некорректный UpdateID');
+                        rangeUpdateError.noRetry = true;
+                        throw rangeUpdateError;
+                    }
+                }
+                items = decodeDidl(result);
             } catch (e) {
                 if (window.console && console.error) console.error('[DLNA Bridge] Browse response parse failed', e, raw);
-                failure(new Error('Разбор ответа SOAP/DIDL: ' + errorText(e)));
+                var browseError = new Error('Разбор ответа SOAP/DIDL: ' + errorText(e));
+                if (e && e.noRetry) browseError.noRetry = true;
+                failure(browseError);
+                return;
             }
+                success(items, total, update, items.returnedCount, hasUpdate);
         }, failure);
     }
 
-    function browseAll(objectId, callback) {
+    function browseAll(objectId, callback, token) {
+        token = token === undefined ? browseToken : token;
+        function isCurrent() {
+            return token === browseToken;
+        }
+        if (!isCurrent()) return;
         if (cache[objectId]) { callback(null, cache[objectId].slice()); return; }
         var collected = [];
         var offset = 0;
+        var expectedTotal = null;
+        var expectedUpdateKnown = false;
+        var expectedHasUpdate = false;
+        var expectedUpdate = null;
         function page() {
+            if (!isCurrent()) return;
             var attempts = 0;
             function requestPage() {
+                if (!isCurrent()) return;
                 attempts++;
-                soapBrowse(objectId, offset, PAGE_SIZE, function (items, total) {
+                soapBrowse(objectId, offset, PAGE_SIZE, function (items, total, update, returnedCount, hasUpdate) {
+                    if (!isCurrent()) return;
+                    returnedCount = typeof returnedCount === 'number' ? returnedCount : items.length;
+                    if (expectedTotal === null) expectedTotal = total;
+                    else if (total !== expectedTotal) {
+                        callback(new Error('TotalMatches изменился во время Browse'));
+                        return;
+                    }
+                    if (!expectedUpdateKnown) {
+                        expectedUpdateKnown = true;
+                        expectedHasUpdate = hasUpdate === true;
+                        expectedUpdate = update;
+                        // Compatibility: accept UpdateID only when every page omits it; in that case
+                        // concurrent catalog changes cannot be detected for this Browse operation.
+                    } else if ((hasUpdate === true) !== expectedHasUpdate ||
+                        (expectedHasUpdate && update !== expectedUpdate)) {
+                        callback(new Error('UpdateID изменился или отсутствует на одной из страниц Browse'));
+                        return;
+                    }
                     // Some DLNA servers return an empty/unfinished first response while waking up.
                     // Retry instead of caching an incomplete catalog.
-                    if (!items.length && total > offset && attempts < 3) {
-                        setTimeout(requestPage, attempts * 700);
+                    if (!returnedCount && total > offset) {
+                        if (attempts < 3) {
+                            setTimeout(requestPage, attempts * 700);
+                            return;
+                        }
+                        callback(new Error('Browse вернул пустую страницу при наличии элементов'));
+                        return;
+                    }
+                    if (offset + returnedCount > total) {
+                        callback(new Error('Browse вернул больше элементов, чем указано в TotalMatches'));
                         return;
                     }
                     collected = collected.concat(items);
-                    offset += items.length;
-                    if (offset < total && items.length && offset < MAX_ITEMS) page();
-                    else {
-                        cache[objectId] = collected.slice();
-                        callback(null, collected);
+                    offset += returnedCount;
+                    if (offset < total) {
+                        if (offset < MAX_ITEMS) page();
+                        else callback(new Error('Каталог превышает лимит элементов; неполный результат не кэширован'));
+                        return;
                     }
+                    if (offset !== total) {
+                        callback(new Error('Не удалось подтвердить полноту каталога'));
+                        return;
+                    }
+                    if (!isCurrent()) return;
+                    cache[objectId] = collected.slice();
+                    callback(null, collected);
                 }, function (error) {
+                    if (!isCurrent()) return;
+                    if (error && error.noRetry) {
+                        callback(error);
+                        return;
+                    }
                     if (attempts < 3) {
                         setTimeout(requestPage, attempts * 700);
                         return;
                     }
                     callback(error);
-                });
+                }, isCurrent);
             }
             requestPage();
         }
@@ -563,11 +744,13 @@
         }
 
         function selectItem(selected) {
+            invalidateBrowseRequests();
             restoreController();
             if (onSelect) onSelect(selected);
         }
 
         function backFromSelect() {
+            invalidateBrowseRequests();
             restoreController();
             if (onBack) onBack();
         }
@@ -597,6 +780,7 @@
 
             activeMenuClose = function () {
                 activeMenuClose = null;
+                invalidateBrowseRequests();
                 deactivateKeypadBackDiagnostic();
                 if (Lampa.Select && typeof Lampa.Select.closeAll === 'function') Lampa.Select.closeAll();
                 else if (Lampa.Select && typeof Lampa.Select.close === 'function') Lampa.Select.close();
@@ -661,6 +845,7 @@
             renderBackDiagnostics();
         }
         function close() {
+            invalidateBrowseRequests();
             window.removeEventListener('keydown', keyHandler, true);
             window.removeEventListener('keyup', keyUpHandler, true);
             deactivateKeypadBackDiagnostic();
@@ -809,9 +994,58 @@
         }
     }
 
+    function invalidateBrowseRequests() {
+        browseToken++;
+    }
+
+    function bindSettingsLifecycle() {
+        var settings = window.Lampa && Lampa.Settings;
+        var listener = settings && settings.listener;
+        if (!listener || typeof listener.follow !== 'function') return;
+
+        var handler = guardState.settingsLifecycleHandler;
+        if (typeof handler !== 'function') {
+            handler = function (event) {
+                // Settings emits open for its main screen and each component.
+                // Leaving this plugin's settings component invalidates an in-flight Browse.
+                if (!event || event.name !== COMPONENT) invalidateBrowseRequests();
+            };
+            guardState.settingsLifecycleHandler = handler;
+        }
+
+        if (guardState.settingsLifecycleState === 'registered') return;
+        if (guardState.settingsLifecycleState === 'uncertain') {
+            if (typeof listener.has !== 'function') return;
+            try {
+                if (listener.has('open', handler) && listener.has('close', handler)) {
+                    guardState.settingsLifecycleState = 'registered';
+                    return;
+                }
+            } catch (hasError) { return; }
+        }
+
+        guardState.settingsLifecycleState = 'uncertain';
+        try {
+            listener.follow('open,close', handler);
+            guardState.settingsLifecycleState = 'registered';
+        } catch (followError) {
+            if (typeof listener.has === 'function') {
+                try {
+                    if (listener.has('open', handler) && listener.has('close', handler)) {
+                        guardState.settingsLifecycleState = 'registered';
+                        return;
+                    }
+                } catch (hasError) {}
+            }
+            guardState.settingsLifecycleState = 'uncertain';
+        }
+    }
+
     function showFolder(objectId, title, parents) {
+        var token = ++browseToken;
         notify('Загрузка: ' + title);
         browseAll(objectId, function (error, items) {
+            if (token !== browseToken) return;
             if (error) {
                 notify('Ошибка Browse: ' + errorText(error), 'error');
                 return;
@@ -839,10 +1073,11 @@
                     showFolder(parent.id, parent.title, parents.slice(0, -1));
                 }
             });
-        });
+        }, token);
     }
 
     function openCatalog() {
+        bindSettingsLifecycle();
         showFolder('0', 'DLNA — ' + baseUrl(), []);
     }
 
@@ -854,6 +1089,7 @@
         var handler = guardState.playerCloseHandler;
         if (typeof handler !== 'function') {
             handler = function () {
+                invalidateBrowseRequests();
                 if (activeMenuClose) activeMenuClose();
                 var staleMenu = document.getElementById('dlna-bridge-menu');
                 if (staleMenu && staleMenu.parentNode) staleMenu.parentNode.removeChild(staleMenu);
@@ -916,6 +1152,7 @@
 
         try {
             registerPlayerCloseListener();
+            bindSettingsLifecycle();
             addTranslations();
 
             registerComponent();
