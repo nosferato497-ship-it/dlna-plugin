@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.5.8
+/* Lampa DLNA Bridge 0.5.9
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_058';
+    var GUARD = 'lampa_dlna_bridge_059';
     var initialGuard = window[GUARD];
     var guardState = initialGuard && typeof initialGuard === 'object' ? initialGuard : {};
     if (guardState && (guardState.initialized || guardState.initializing)) return;
@@ -180,7 +180,7 @@
         try {
             Lampa.SettingsApi.addComponent({
                 component: COMPONENT,
-                name: 'DLNA Bridge 0.5.8',
+                name: 'DLNA Bridge 0.5.9',
                 icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
             });
             setRegistrationState(name, 'registered');
@@ -235,7 +235,7 @@
         }
         try {
             Lampa.Lang.add({
-                dlna_bridge_title: { ru: 'DLNA Bridge 0.5.8', en: 'DLNA Bridge 0.5.8' },
+                dlna_bridge_title: { ru: 'DLNA Bridge 0.5.9', en: 'DLNA Bridge 0.5.9' },
                 dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
                 dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
                 dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -513,6 +513,43 @@
         return doc;
     }
 
+    function isValidResourceUrl(value) {
+        var match = /^(https?):\/\/([^\/?#\s]+)(?:[\/?#][^\s]*)?$/i.exec(value);
+        if (!match) return false;
+        var authority = match[2];
+        var at = authority.lastIndexOf('@');
+        if (at >= 0) authority = authority.slice(at + 1);
+        if (!authority) return false;
+        if (authority.charAt(0) === '[') {
+            var bracket = authority.indexOf(']');
+            if (bracket < 2 || !/^[0-9a-f:.]+$/i.test(authority.slice(1, bracket)) || authority.slice(1, bracket).indexOf(':') < 0) return false;
+            var ipv6Port = authority.slice(bracket + 1);
+            if (!ipv6Port) return true;
+            if (!/^:\d+$/.test(ipv6Port)) return false;
+            var ipv6PortNumber = parseInt(ipv6Port.slice(1), 10);
+            return ipv6PortNumber > 0 && ipv6PortNumber <= 65535;
+        }
+        var firstColon = authority.indexOf(':');
+        var lastColon = authority.lastIndexOf(':');
+        if (firstColon !== lastColon) return false;
+        if (lastColon >= 0) {
+            var port = authority.slice(lastColon + 1);
+            var portNumber = parseInt(port, 10);
+            if (!authority.slice(0, lastColon) || !/^\d+$/.test(port) || portNumber < 1 || portNumber > 65535) return false;
+            authority = authority.slice(0, lastColon);
+        }
+        return !!authority;
+    }
+
+    // Auxiliary DIDL-Lite resources (thumbnails, subtitles) are not playable media.
+    // MiniDLNA may attach them to a video item as extra res elements.
+    function isAuxiliaryResourceMime(mime) {
+        var value = String(mime || '').toLowerCase();
+        if (value.indexOf('image/') === 0 || value.indexOf('text/') === 0) return true;
+        return value === 'application/x-subrip' || value === 'application/ttml+xml' ||
+            value === 'application/x-ass' || value === 'application/x-ssa';
+    }
+
     function decodeDidl(encoded) {
         var doc = parseXml('<root>' + encoded + '</root>');
         var nodes = doc.getElementsByTagName('*');
@@ -533,7 +570,8 @@
                 protocolInfo: '',
                 mime: '',
                 duration: '',
-                size: 0
+                size: 0,
+                resources: []
             };
             for (var j = 0; j < node.childNodes.length; j++) {
                 var child = node.childNodes[j];
@@ -541,14 +579,39 @@
                 var name = child.localName || child.nodeName.split(':').pop();
                 if (name === 'title') entry.title = child.textContent || '';
                 if (name === 'res') {
-                    entry.url = child.textContent || '';
-                    entry.protocolInfo = child.getAttribute('protocolInfo') || '';
-                    entry.duration = child.getAttribute('duration') || '';
-                    entry.size = parseInt(child.getAttribute('size') || '0', 10);
+                    var resourceUrl = String(child.textContent || '').replace(/^\s+|\s+$/g, '');
+                    var protocolInfo = child.getAttribute('protocolInfo') || '';
+                    if (!resourceUrl || !isValidResourceUrl(resourceUrl)) continue;
+                    var duplicate = false;
+                    for (var resourceIndex = 0; resourceIndex < entry.resources.length; resourceIndex++) {
+                        if (entry.resources[resourceIndex].url === resourceUrl) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (duplicate) continue;
+                    var protocolParts = protocolInfo.split(':');
+                    var resourceMime = protocolParts.length > 2 ? protocolParts[2] : '';
+                    if (isAuxiliaryResourceMime(resourceMime)) continue;
+                    var resource = {
+                        url: resourceUrl,
+                        protocolInfo: protocolInfo,
+                        mime: resourceMime,
+                        duration: child.getAttribute('duration') || '',
+                        size: parseInt(child.getAttribute('size') || '0', 10) || 0,
+                        resolution: child.getAttribute('resolution') || '',
+                        bitrate: parseInt(child.getAttribute('bitrate') || '0', 10) || 0
+                    };
+                    entry.resources.push(resource);
+                    // Legacy fields describe the first playable resource.
+                    if (entry.resources.length > 1) continue;
+                    entry.url = resource.url;
+                    entry.protocolInfo = resource.protocolInfo;
+                    entry.duration = resource.duration;
+                    entry.size = resource.size;
+                    entry.mime = resource.mime;
                 }
             }
-            var p = entry.protocolInfo.split(':');
-            entry.mime = p.length > 2 ? p[2] : '';
             if (entry.title) items.push(entry);
         }
         items.returnedCount = returnedCount;
@@ -945,7 +1008,35 @@
         return gb >= 1 ? gb.toFixed(2) + ' ГБ' : (bytes / 1048576).toFixed(0) + ' МБ';
     }
 
-    function play(entry) {
+    function formatResourceSubtitle(resource) {
+        var details = [];
+        if (resource.mime) details.push(resource.mime);
+        if (resource.resolution) details.push(resource.resolution);
+        if (resource.bitrate) details.push(Math.round(resource.bitrate / 1000) + ' кбит/с');
+        if (resource.duration) details.push(resource.duration);
+        if (resource.size) details.push(formatSize(resource.size));
+        return details.join(' · ') || 'Характеристики не указаны';
+    }
+
+    function showResourceSelect(entry, objectId, title, parents) {
+        var rows = entry.resources.map(function (resource, index) {
+            return {
+                title: (entry.title || 'Видео') + ' — ресурс ' + (index + 1),
+                subtitle: formatResourceSubtitle(resource),
+                entry: entry,
+                resource: resource
+            };
+        });
+        openSelect('Выберите ресурс: ' + (entry.title || 'Видео'), rows, function (selected) {
+            if (selected && selected.resource && selected.resource.url) play(entry, selected.resource);
+        }, function () {
+            showFolder(objectId, title, parents);
+        });
+    }
+
+    function play(entry, selectedResource) {
+        var resource = selectedResource || (entry && entry.resources && entry.resources.length === 1 ? entry.resources[0] : null);
+        var playUrl = resource && resource.url ? resource.url : (entry && entry.url ? entry.url : '');
         var menu = document.getElementById('dlna-bridge-menu');
         if (menu) {
             menu.style.display = 'none';
@@ -954,7 +1045,7 @@
             if (menu.parentNode) menu.parentNode.removeChild(menu);
         }
         notify('Выбран файл: ' + (entry.title || 'без названия'), 'default');
-        if (!entry.url) {
+        if (!playUrl) {
             notify('У этого элемента нет прямого URL ресурса.', 'warning');
             return;
         }
@@ -981,7 +1072,7 @@
         } catch (controllerError) {}
         try {
             Lampa.Player.play({
-                url: entry.url,
+                url: playUrl,
                 title: entry.title,
                 quality: 'DLNA'
             });
@@ -1056,7 +1147,8 @@
             }
             var rows = items.map(function (entry) {
                 var subtitle = entry.isFolder ? ('Папка' + (entry.childCount ? ' · ' + entry.childCount : '')) :
-                    [entry.mime, entry.duration, formatSize(entry.size)].filter(Boolean).join(' · ');
+                    (entry.resources && entry.resources.length > 1 ? 'Ресурсов: ' + entry.resources.length :
+                        [entry.mime, entry.duration, formatSize(entry.size)].filter(Boolean).join(' · '));
                 return {
                     title: entry.title,
                     subtitle: subtitle,
@@ -1066,7 +1158,8 @@
             openSelect(title, rows, function (selected) {
                 var entry = selected.entry || selected;
                 if (entry.isFolder) showFolder(entry.id, entry.title, (parents || []).concat([{ id: objectId, title: title }]));
-                else play(entry);
+                else if (entry.resources && entry.resources.length > 1) showResourceSelect(entry, objectId, title, parents || []);
+                else play(entry, entry.resources && entry.resources.length ? entry.resources[0] : null);
             }, function () {
                 if (parents && parents.length) {
                     var parent = parents[parents.length - 1];
