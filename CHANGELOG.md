@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.9 — Multiple DLNA resources
+
+- Preserve every distinct valid HTTP(S) `res` resource and its available protocol, MIME, size, duration, resolution, and bitrate metadata.
+- Open the native Lampa Select menu only when an item has multiple resources; play a single resource directly and retain legacy URL fallback.
+- Show the resource count in the catalog row of a multi-resource item instead of the metadata of only one resource.
+- Skip auxiliary `res` entries (`image/*`, `text/*`, subtitle MIME types such as MiniDLNA captions and `JPEG_TN` thumbnails) so they are never offered as playable resources; legacy `url`/`mime`/`size`/`duration` fields now describe the first playable resource.
+- Add resource parsing, validation, selection, Back, and playback regression tests.
+
+## 0.5.8 — Network reliability
+
+- Guard native request completion so success or error is delivered no more than once, including synchronous transport exceptions and cleanup failures.
+- Ignore stale Browse responses after DLNA navigation, closing the catalog, or leaving its Lampa Settings component.
+- Validate `TotalMatches` on every page and reject changing counts or incomplete results without caching them.
+- Keep the 200-item page size, 5000-item safety cap, SOAP request format, and direct player URL handoff.
+- Add network reliability and Settings lifecycle regression tests.
+
+## 0.5.7 — AndroidJS API inspection
+
+- Extend the read-only AndroidJS diagnostics with metadata and bounded function source for `httpReq`, `get`, `getResp`, and `dump`; the methods are never invoked.
+- Report missing methods and accessor properties without reading them. No network or UDP probes are performed.
+
 ## 0.5.6 — Android bridge diagnostics
 
 - Verify registration outcomes through SettingsApi getters, keep uncertain steps from duplicating entries, isolate optional AndroidJS registration, and use the correct 0.5.6 component label.
