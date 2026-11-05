@@ -100,7 +100,7 @@ function itemXml(resources, title) {
         resources.join('') + '</item></DIDL-Lite>';
 }
 
-function createHarness() {
+function createHarness(dom) {
     var selects = [];
     var played = [];
     var notices = [];
@@ -108,7 +108,7 @@ function createHarness() {
     var source = fs.readFileSync(path.join(__dirname, '..', 'plugin.js'), 'utf8');
     source = source.replace(
         'if (window.appready) init();',
-        'window.__test = { decodeDidl: decodeDidl, showFolder: showFolder, play: play, cache: cache }; if (window.appready) init();'
+        'window.__test = { decodeDidl: decodeDidl, showFolder: showFolder, play: play, isValidResourceUrl: isValidResourceUrl, cache: cache }; if (window.appready) init();'
     );
     var controller = { name: 'settings_component' };
     var Lampa = {
@@ -123,7 +123,10 @@ function createHarness() {
             collectionSet: function () {}, collectionFocus: function () {}
         },
         Select: { show: function (config) { selects.push(config); } },
-        Player: { play: function (data) { played.push(data); }, callback: function () {} },
+        Player: { play: function (data) {
+            if (dom) assertMenuClosed(dom);
+            played.push(data);
+        }, callback: function () {} },
         Noty: { show: function (message) { notices.push(message); } }
     };
     var window = { Lampa: Lampa, appready: false, DOMParser: TestDOMParser, $: function (value) { return value; } };
@@ -131,11 +134,19 @@ function createHarness() {
         getElementById: function () { return null; },
         createElement: function () { return { style: {}, textContent: '' }; }
     };
+    if (dom) {
+        document = dom.document;
+        window.addEventListener = dom.addEventListener;
+        window.removeEventListener = dom.removeEventListener;
+        delete Lampa.Select;
+    }
     vm.runInNewContext(source, {
         window: window,
         Lampa: Lampa,
         document: document,
         DOMParser: TestDOMParser,
+        setTimeout: dom && dom.setTimeout,
+        clearTimeout: dom && dom.clearTimeout,
         console: { log: function () {}, error: function () {} }
     });
     return { test: window.__test, selects: selects, played: played, notices: notices, cache: cached };
@@ -340,4 +351,333 @@ test('takes legacy fields from the first playable resource', function () {
     assert.strictEqual(entry.mime, 'video/mp4');
     assert.strictEqual(entry.size, 100);
     assert.strictEqual(entry.duration, '0:01:00');
+});
+
+var invalidPlaybackUrls = [
+    '',
+    'javascript:alert(1)', 'data:text/html,test', 'file:///video.mp4',
+    'ftp://server/video.mp4', '/video.mp4', '//server/video.mp4',
+    'http://999.999.999.999/video.mp4', 'http://256.1.1.1/video.mp4',
+    'http://1.2.3/video.mp4', 'http://1.2.3.4.5/video',
+    'http://[::::]:8200/video', 'http://[1::2::3]/video',
+    'http://[1:2:3:4:5:6:7]/video', 'http://[1:2:3:4:5:6:7:8:9]/video',
+    'http://[1:2:3:4:5:6:7:8::]/video', 'http://[gggg::1]/video',
+    'http://[::ffff:256.1.1.1]/video', 'http://[::1/video',
+    'http://[::1]extra/video', 'http://::1/video',
+    'http:///video', 'http://:80/video', 'http://host:0/video',
+    'http://host:65536/video', 'http://host:/video', 'http://host:no/video',
+    'http://user@other@host/video', 'http://bad_host/video',
+    'http://host\\@evil/video', 'http://host/%zz', 'http://host/line\nfeed',
+    'http://0x7f000001/video', 'http://0177.0.0.1/video'
+];
+
+invalidPlaybackUrls.forEach(function (url) {
+    test('rejects URL at parsing and every playback entry: ' + JSON.stringify(url), function () {
+        var harness = createHarness();
+        assert.strictEqual(harness.test.isValidResourceUrl(url), false);
+        assert.strictEqual(harness.test.decodeDidl(itemXml([res(url, {})]))[0].resources.length, 0);
+        harness.test.play({ title: 'Legacy', url: url });
+        harness.test.play({ title: 'Resource', url: 'http://media/fallback', resources: [{ url: url }] });
+        harness.test.play({ title: 'Selected', url: 'http://media/fallback' }, { url: url });
+        assert.strictEqual(harness.played.length, 0);
+        assert.strictEqual(harness.notices.length, 3);
+    });
+});
+
+var validPlaybackUrls = [
+    'http://192.168.1.1:8200/video.mp4', 'http://127.0.0.1/video.mp4',
+    'http://localhost:8200/video.mp4', 'http://media-server/video',
+    'http://media.example.org/video', 'http://media.example.org./video',
+    'http://[::1]/video', 'http://[2001:db8::abcd]:8200/video',
+    'http://[1:2:3:4:5:6:7:8]/video', 'http://[::]/video',
+    'http://[::ffff:192.168.1.1]/video', 'http://[1:2:3:4:5:6:192.168.1.1]/video',
+    'https://media/video', 'http://media/video?a=1&token=x%2Fy',
+    'http://media/video#chapter', 'http://media/a%20b/video',
+    'http://user:p%40ss@media/video'
+];
+[1, 80, 443, 65535].forEach(function (port) {
+    validPlaybackUrls.push('http://localhost:' + port + '/video');
+    validPlaybackUrls.push('http://[::1]:' + port + '/video');
+});
+validPlaybackUrls.forEach(function (url) {
+    test('preserves valid URL in legacy and selected playback: ' + url, function () {
+        var harness = createHarness();
+        assert.strictEqual(harness.test.isValidResourceUrl(url), true);
+        harness.test.play({ title: 'Legacy', url: url });
+        harness.test.play({ title: 'Selected' }, { url: url });
+        assert.strictEqual(harness.played.length, 2);
+        assert.strictEqual(harness.played[0].url, url);
+        assert.strictEqual(harness.played[1].url, url);
+    });
+});
+
+test('bounds URL length at 8192 characters for parsing and playback', function () {
+    var harness = createHarness();
+    var prefix = 'http://media/video?token=';
+    [8192, 8193, 16384].forEach(function (length) {
+        var url = prefix + new Array(length - prefix.length + 1).join('a');
+        assert.strictEqual(harness.test.isValidResourceUrl(url), length === 8192);
+        assert.strictEqual(harness.test.decodeDidl(itemXml([res(url, {})]))[0].resources.length, length === 8192 ? 1 : 0);
+        var before = harness.played.length;
+        harness.test.play({ title: 'Legacy', url: url });
+        assert.strictEqual(harness.played.length - before, length === 8192 ? 1 : 0);
+    });
+});
+
+test('invalid selected URL leaves resource menu Back and reopening usable', function () {
+    var harness = createHarness();
+    var entry = { title: 'Video', resources: [
+        { url: 'http://media/a', resolution: '640x360' },
+        { url: 'http://media/b', resolution: '1920x1080' }
+    ] };
+    var catalog = runCachedFolder(harness, [entry]);
+    catalog.items[0].onSelect();
+    var beforeNotices = harness.notices.length;
+    entry.resources[1].url = 'javascript:alert(1)';
+    harness.selects[1].items[1].onSelect();
+    assert.strictEqual(harness.played.length, 0);
+    assert.strictEqual(harness.notices.length - beforeNotices, 1);
+    harness.selects[1].onBack();
+    harness.selects[2].items[0].onSelect();
+    harness.selects[3].items[0].onSelect();
+    assert.strictEqual(harness.played.length, 1);
+    assert.strictEqual(harness.played[0].url, 'http://media/a');
+});
+
+// Minimal DOM and deterministic timers: run the real menu code, not callback stubs.
+function menuDom() {
+    var listeners = { keydown: [], keyup: [] };
+    var timers = {};
+    var nextTimer = 0;
+    var dom = {};
+    function element(tag) {
+        return {
+            tag: tag, style: {}, children: [], events: {}, parentNode: null,
+            appendChild: function (child) { this.children.push(child); child.parentNode = this; },
+            removeChild: function (child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; },
+            addEventListener: function (type, handler) { this.events[type] = handler; },
+            focus: function () {
+                dom.document.activeElement = this;
+                if (this.events.focus) this.events.focus();
+            },
+            scrollIntoView: function () {}
+        };
+    }
+    function descendants(node) {
+        var result = [node];
+        node.children.forEach(function (child) { result = result.concat(descendants(child)); });
+        return result;
+    }
+    dom.document = {
+        body: element('body'), activeElement: null, createElement: element,
+        getElementById: function (id) {
+            return descendants(this.body).filter(function (node) { return node.id === id; })[0] || null;
+        }
+    };
+    dom.addEventListener = function (type, handler) { listeners[type].push(handler); };
+    dom.removeEventListener = function (type, handler) {
+        listeners[type] = listeners[type].filter(function (candidate) { return candidate !== handler; });
+    };
+    dom.setTimeout = function (callback, delay) {
+        assert.strictEqual(delay, 600);
+        timers[++nextTimer] = callback;
+        return nextTimer;
+    };
+    dom.clearTimeout = function (id) { delete timers[id]; };
+    dom.flush = function () {
+        Object.keys(timers).forEach(function (id) {
+            var callback = timers[id];
+            delete timers[id];
+            if (callback) callback();
+        });
+    };
+    dom.pending = function () { return Object.keys(timers).length; };
+    dom.count = function (type) { return listeners[type].length; };
+    dom.key = function (key, type) {
+        var event = { key: key, preventDefault: function () {}, stopPropagation: function () {}, stopImmediatePropagation: function () {} };
+        listeners[type || 'keydown'].slice().forEach(function (handler) { handler(event); });
+    };
+    dom.overlay = function () { return dom.document.getElementById('dlna-bridge-menu'); };
+    dom.buttons = function () { return descendants(dom.document.body).filter(function (node) { return node.tag === 'button'; }); };
+    return dom;
+}
+
+function domFolder(entries) {
+    var dom = menuDom();
+    var harness = createHarness(dom);
+    harness.test.cache.library = entries;
+    harness.test.showFolder('library', 'Library', []);
+    return { dom: dom, harness: harness };
+}
+
+function assertMenuOpen(dom, index) {
+    assert.ok(dom.overlay());
+    assert.strictEqual(dom.count('keydown'), 1);
+    assert.strictEqual(dom.count('keyup'), 1);
+    assert.strictEqual(dom.document.activeElement, dom.buttons()[index]);
+}
+
+function assertMenuClosed(dom) {
+    assert.strictEqual(dom.overlay(), null);
+    assert.strictEqual(dom.count('keydown'), 0);
+    assert.strictEqual(dom.count('keyup'), 0);
+    assert.strictEqual(dom.pending(), 0);
+}
+
+test('DOM invalid legacy OK preserves overlay, focus and Back without pending callbacks', function () {
+    var state = domFolder([{ title: 'Bad', url: 'javascript:alert(1)' }]);
+    var dom = state.dom;
+    var harness = state.harness;
+    var before = harness.notices.length;
+    dom.key('Enter');
+    dom.key('Enter');
+    dom.key('Enter', 'keyup');
+    assertMenuOpen(dom, 0);
+    assert.strictEqual(dom.pending(), 0);
+    assert.strictEqual(harness.notices.length - before, 2);
+    assert.strictEqual(harness.played.length, 0);
+    dom.key('Escape');
+    dom.flush();
+    assertMenuClosed(dom);
+    assert.strictEqual(harness.played.length, 0);
+});
+
+test('DOM invalid resource permits selecting a valid second resource exactly once', function () {
+    var state = domFolder([{ title: 'Video', resources: [
+        { url: 'http://[::::]/bad' }, { url: 'http://media/good', resolution: '1920x1080' }
+    ] }]);
+    var dom = state.dom;
+    var harness = state.harness;
+    dom.key('Enter');
+    dom.flush();
+    assertMenuOpen(dom, 0);
+    assert.match(dom.buttons()[1].textContent, /1920x1080/);
+    dom.key('Enter');
+    assertMenuOpen(dom, 0);
+    assert.strictEqual(dom.pending(), 0);
+    dom.key('ArrowDown');
+    assertMenuOpen(dom, 1);
+    dom.key('Enter');
+    dom.key('Enter');
+    dom.buttons()[1].events.click();
+    assert.strictEqual(dom.pending(), 1);
+    assert.strictEqual(harness.played.length, 0);
+    dom.flush();
+    assertMenuClosed(dom);
+    assert.strictEqual(harness.played.length, 1);
+    assert.strictEqual(harness.played[0].url, 'http://media/good');
+    dom.flush();
+    assert.strictEqual(harness.played.length, 1);
+});
+
+test('DOM quick Back cancels pending valid playback and allows reopening', function () {
+    var state = domFolder([{ title: 'Legacy', url: 'http://media/legacy' }]);
+    var dom = state.dom;
+    var harness = state.harness;
+    dom.key('Enter');
+    assert.strictEqual(dom.pending(), 1);
+    assertMenuOpen(dom, 0);
+    dom.key('Escape');
+    dom.key('Escape', 'keyup');
+    dom.flush();
+    assertMenuClosed(dom);
+    assert.strictEqual(harness.played.length, 0);
+    harness.test.showFolder('library', 'Library', []);
+    assertMenuOpen(dom, 0);
+    dom.key('Enter');
+    dom.flush();
+    assertMenuClosed(dom);
+    assert.strictEqual(harness.played.length, 1);
+});
+
+test('DOM error Back returns to catalog and reopening does not leak listeners', function () {
+    var state = domFolder([{ title: 'Video', resources: [
+        { url: 'data:text/html,bad' }, { url: 'http://media/good' }
+    ] }]);
+    var dom = state.dom;
+    var harness = state.harness;
+    var i;
+    for (i = 0; i < 3; i++) {
+        dom.key('Enter');
+        dom.flush();
+        dom.key('Enter');
+        assertMenuOpen(dom, 0);
+        dom.key('Escape');
+        assertMenuOpen(dom, 0);
+        assert.match(dom.buttons()[0].textContent, /Video/);
+    }
+    assert.strictEqual(harness.played.length, 0);
+    dom.key('Escape');
+    assertMenuClosed(dom);
+});
+
+test('DOM replacement cancels old pending choice and stale button callbacks', function () {
+    var state = domFolder([{ title: 'Legacy', url: 'http://media/legacy' }]);
+    var dom = state.dom;
+    var harness = state.harness;
+    var oldButton = dom.buttons()[0];
+    oldButton.events.click();
+    harness.test.showFolder('library', 'Library', []);
+    oldButton.events.click();
+    dom.flush();
+    assertMenuOpen(dom, 0);
+    assert.strictEqual(harness.played.length, 0);
+    dom.key('Escape');
+    assertMenuClosed(dom);
+});
+
+test('DOM rechecks URL changed during delay before closing and preserves selected focus', function () {
+    var entry = { title: 'Legacy', url: 'http://media/legacy' };
+    var state = domFolder([entry]);
+    var dom = state.dom;
+    var harness = state.harness;
+    dom.key('Enter');
+    entry.url = 'javascript:alert(1)';
+    dom.flush();
+    assertMenuOpen(dom, 0);
+    assert.strictEqual(harness.played.length, 0);
+    entry.url = 'http://media/recovered';
+    dom.key('Enter');
+    dom.flush();
+    assertMenuClosed(dom);
+    assert.strictEqual(harness.played[0].url, entry.url);
+});
+
+test('DOM click on invalid second resource retains its focus and permits first resource', function () {
+    var state = domFolder([{ title: 'Video', resources: [
+        { url: 'http://media/first' }, { url: 'ftp://media/bad' }
+    ] }]);
+    var dom = state.dom;
+    dom.key('Enter');
+    dom.flush();
+    dom.buttons()[1].events.click();
+    assertMenuOpen(dom, 1);
+    assert.strictEqual(dom.pending(), 0);
+    dom.key('ArrowUp');
+    dom.key('Enter');
+    dom.flush();
+    assertMenuClosed(dom);
+    assert.strictEqual(state.harness.played.length, 1);
+    assert.strictEqual(state.harness.played[0].url, 'http://media/first');
+});
+
+test('DOM quick Back in resource menu cancels choice and restores catalog focus', function () {
+    var state = domFolder([{ title: 'Video', resources: [
+        { url: 'http://media/first' }, { url: 'http://media/second' }
+    ] }]);
+    var dom = state.dom;
+    dom.key('Enter');
+    dom.flush();
+    dom.key('ArrowDown');
+    dom.key('Enter');
+    dom.key('Escape');
+    dom.flush();
+    assertMenuOpen(dom, 0);
+    assert.strictEqual(state.harness.played.length, 0);
+    dom.key('Enter');
+    dom.flush();
+    assertMenuOpen(dom, 0);
+    dom.key('Escape');
+    dom.key('Escape');
+    assertMenuClosed(dom);
 });
