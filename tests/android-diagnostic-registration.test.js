@@ -11,7 +11,7 @@ function createHarness(options) {
     var componentCalls = 0;
     var params = [];
     if (options.existingComponent) {
-        components.push({ component: 'dlna_bridge', name: 'DLNA Bridge 0.5.9' });
+        components.push({ component: 'dlna_bridge', name: 'DLNA Bridge 0.5.9.2' });
     }
     if (options.existingParams) {
         options.existingParams.forEach(function (name) {
@@ -621,9 +621,9 @@ test('keeps core initialization successful when AndroidJS is inserted before its
     assert.strictEqual(harness.state().initialized, true);
 });
 
-test('uses the 0.5.9 component label', function () {
+test('uses the 0.5.9.2 component label', function () {
     var harness = createHarness();
-    assert.strictEqual(harness.components[0].name, 'DLNA Bridge 0.5.9');
+    assert.strictEqual(harness.components[0].name, 'DLNA Bridge 0.5.9.2');
 });
 
 test('migrates a legacy true guard without duplicating existing settings registrations', function () {

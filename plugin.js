@@ -1,4 +1,4 @@
-/* Lampa DLNA Bridge 0.5.9
+/* Lampa DLNA Bridge 0.5.9.2
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
@@ -180,7 +180,7 @@
         try {
             Lampa.SettingsApi.addComponent({
                 component: COMPONENT,
-                name: 'DLNA Bridge 0.5.9',
+                name: 'DLNA Bridge 0.5.9.2',
                 icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
             });
             setRegistrationState(name, 'registered');
@@ -235,7 +235,7 @@
         }
         try {
             Lampa.Lang.add({
-                dlna_bridge_title: { ru: 'DLNA Bridge 0.5.9', en: 'DLNA Bridge 0.5.9' },
+                dlna_bridge_title: { ru: 'DLNA Bridge 0.5.9.2', en: 'DLNA Bridge 0.5.9.2' },
                 dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
                 dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
                 dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -513,32 +513,77 @@
         return doc;
     }
 
+    function isValidIpv4(value) {
+        var parts = value.split('.');
+        if (parts.length !== 4) return false;
+        var i;
+        for (i = 0; i < parts.length; i++) {
+            // Reject ambiguous octal/short forms as well as out-of-range octets.
+            if (!/^(0|[1-9][0-9]{0,2})$/.test(parts[i]) || Number(parts[i]) > 255) return false;
+        }
+        return true;
+    }
+
+    function isValidIpv6(value) {
+        if (value.indexOf(':') < 0) return false;
+        if (value.indexOf('.') >= 0) {
+            var lastColon = value.lastIndexOf(':');
+            if (!isValidIpv4(value.slice(lastColon + 1))) return false;
+            // An IPv4 tail occupies two IPv6 groups.
+            value = value.slice(0, lastColon + 1) + '0:0';
+        }
+        var halves = value.split('::');
+        if (halves.length > 2) return false;
+        var groups = [];
+        var i;
+        for (i = 0; i < halves.length; i++) {
+            if (halves[i]) groups = groups.concat(halves[i].split(':'));
+        }
+        if (halves.length === 1 ? groups.length !== 8 : groups.length >= 8) return false;
+        for (i = 0; i < groups.length; i++) {
+            if (!/^[0-9a-f]{1,4}$/i.test(groups[i])) return false;
+        }
+        return true;
+    }
+
     function isValidResourceUrl(value) {
-        var match = /^(https?):\/\/([^\/?#\s]+)(?:[\/?#][^\s]*)?$/i.exec(value);
+        // 8192 characters leaves ample room for DLNA paths and signed queries while bounding input.
+        if (typeof value !== 'string' || value.length > 8192 || /[\s\x00-\x1f\x7f\\]/.test(value)) return false;
+        if (/%(?![0-9a-f]{2})/i.test(value)) return false;
+        var match = /^(https?):\/\/([^\/?#]+)(?:[\/?#].*)?$/i.exec(value);
         if (!match) return false;
         var authority = match[2];
-        var at = authority.lastIndexOf('@');
-        if (at >= 0) authority = authority.slice(at + 1);
-        if (!authority) return false;
+        var at = authority.indexOf('@');
+        if (at >= 0) {
+            if (!/^(?:[a-z0-9._~!$&'()*+,;=:\-]|%[0-9a-f]{2})+$/i.test(authority.slice(0, at))) return false;
+            authority = authority.slice(at + 1);
+        }
+        var host;
+        var port = null;
         if (authority.charAt(0) === '[') {
             var bracket = authority.indexOf(']');
-            if (bracket < 2 || !/^[0-9a-f:.]+$/i.test(authority.slice(1, bracket)) || authority.slice(1, bracket).indexOf(':') < 0) return false;
-            var ipv6Port = authority.slice(bracket + 1);
-            if (!ipv6Port) return true;
-            if (!/^:\d+$/.test(ipv6Port)) return false;
-            var ipv6PortNumber = parseInt(ipv6Port.slice(1), 10);
-            return ipv6PortNumber > 0 && ipv6PortNumber <= 65535;
+            if (bracket < 0 || !isValidIpv6(authority.slice(1, bracket))) return false;
+            var suffix = authority.slice(bracket + 1);
+            if (suffix && suffix.charAt(0) !== ':') return false;
+            if (suffix) port = suffix.slice(1);
+        } else {
+            var parts = authority.split(':');
+            if (parts.length > 2) return false;
+            host = parts[0];
+            if (parts.length === 2) port = parts[1];
+            if (!host || host.length > 253) return false;
+            // Numeric final labels can be interpreted as nonstandard IPv4 by URL parsers.
+            if (/^[0-9.]+$/.test(host) || /(?:^|\.)(?:[0-9]+|0x[0-9a-f]+)\.?$/i.test(host)) {
+                if (!isValidIpv4(host)) return false;
+            } else {
+                var labels = host.replace(/\.$/, '').split('.');
+                var i;
+                for (i = 0; i < labels.length; i++) {
+                    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(labels[i])) return false;
+                }
+            }
         }
-        var firstColon = authority.indexOf(':');
-        var lastColon = authority.lastIndexOf(':');
-        if (firstColon !== lastColon) return false;
-        if (lastColon >= 0) {
-            var port = authority.slice(lastColon + 1);
-            var portNumber = parseInt(port, 10);
-            if (!authority.slice(0, lastColon) || !/^\d+$/.test(port) || portNumber < 1 || portNumber > 65535) return false;
-            authority = authority.slice(0, lastColon);
-        }
-        return !!authority;
+        return port === null || (/^[0-9]+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535);
     }
 
     // Auxiliary DIDL-Lite resources (thumbnails, subtitles) are not playable media.
@@ -875,6 +920,23 @@
         }
     }
 
+    function playbackUrl(entry, selectedResource) {
+        var resource = selectedResource || (entry && entry.resources && entry.resources.length === 1 ? entry.resources[0] : null);
+        return resource ? resource.url : (entry && entry.url ? entry.url : '');
+    }
+
+    function validatePlaybackUrl(url) {
+        if (isValidResourceUrl(url)) return true;
+        notify('Недопустимый URL ресурса DLNA.', 'error');
+        return false;
+    }
+
+    function validateMenuSelection(selected) {
+        var entry = selected.entry || selected;
+        if (!selected.resource && (entry.isFolder || (entry.resources && entry.resources.length > 1))) return true;
+        return validatePlaybackUrl(playbackUrl(entry, selected.resource));
+    }
+
     function openSelectDom(title, entries, onSelect, onBack) {
         var old = document.getElementById('dlna-bridge-menu');
         if (old) {
@@ -907,7 +969,13 @@
             domKeyDiagnostic = 'DOM-пульт ' + type + ': key=' + key + ', keyCode=' + code + ', which=' + which;
             renderBackDiagnostics();
         }
+        var closed = false;
+        var pendingChoice = null;
         function close() {
+            if (closed) return;
+            closed = true;
+            if (pendingChoice !== null) clearTimeout(pendingChoice);
+            pendingChoice = null;
             invalidateBrowseRequests();
             window.removeEventListener('keydown', keyHandler, true);
             window.removeEventListener('keyup', keyUpHandler, true);
@@ -921,13 +989,19 @@
         activeMenuClose = close;
         var choosing = false;
         function choose(index) {
-            if (choosing || index < 0 || index >= entries.length) return;
-            choosing = true;
+            if (closed || choosing || index < 0 || index >= entries.length) return;
+            focusIndex(index);
             var selected = entries[index];
-            close();
-            // Give Lampa/WebView time to finish the remote-control key event
-            // and remove the menu before starting navigation or playback.
-            setTimeout(function () {
+            if (!validateMenuSelection(selected)) return;
+            choosing = true;
+            // Keep Back and focus available during the remote-control debounce delay.
+            pendingChoice = setTimeout(function () {
+                pendingChoice = null;
+                if (closed) return;
+                choosing = false;
+                // Cached entries may have changed while the choice was pending.
+                if (!validateMenuSelection(selected)) return;
+                close();
                 onSelect(selected);
             }, 600);
         }
@@ -954,6 +1028,8 @@
                 swallow(event);
                 close();
                 if (onBack) onBack();
+            } else if (choosing) {
+                swallow(event);
             } else if (key === 'ArrowDown' || code === 40) {
                 swallow(event);
                 focusIndex(Math.min(buttons.length - 1, active + 1));
@@ -1035,8 +1111,9 @@
     }
 
     function play(entry, selectedResource) {
-        var resource = selectedResource || (entry && entry.resources && entry.resources.length === 1 ? entry.resources[0] : null);
-        var playUrl = resource && resource.url ? resource.url : (entry && entry.url ? entry.url : '');
+        var playUrl = playbackUrl(entry, selectedResource);
+        // Final validation is mandatory even after a menu preflight.
+        if (!validatePlaybackUrl(playUrl)) return;
         var menu = document.getElementById('dlna-bridge-menu');
         if (menu) {
             menu.style.display = 'none';
@@ -1045,10 +1122,6 @@
             if (menu.parentNode) menu.parentNode.removeChild(menu);
         }
         notify('Выбран файл: ' + (entry.title || 'без названия'), 'default');
-        if (!playUrl) {
-            notify('У этого элемента нет прямого URL ресурса.', 'warning');
-            return;
-        }
         if (!Lampa.Player || !Lampa.Player.play) {
             notify('Файл найден, но Lampa.Player.play недоступен в этой сборке.', 'error');
             return;
