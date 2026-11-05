@@ -1,11 +1,11 @@
-/* Lampa DLNA Bridge 0.5.9.2
+/* Lampa DLNA Bridge 0.6.0
  * Native Lampa.Reguest transport + ContentDirectory Browse + DIDL-Lite navigation.
  * No SSDP discovery: the router server is configured by address.
  */
 (function () {
     'use strict';
 
-    var GUARD = 'lampa_dlna_bridge_059';
+    var GUARD = 'lampa_dlna_bridge_060';
     var initialGuard = window[GUARD];
     var guardState = initialGuard && typeof initialGuard === 'object' ? initialGuard : {};
     if (guardState && (guardState.initialized || guardState.initializing)) return;
@@ -18,6 +18,11 @@
     }
 
     var COMPONENT = 'dlna_bridge';
+    var BROWSER_COMPONENT = 'dlna_bridge_browser';
+    var activeBrowser = null;
+    // A Player.play call remains owned by the plugin until an explicit player completion signal.
+    var pendingPlayback = null;
+    var browserRegistered = false;
     var PREFIX = 'dlna_bridge_';
     var DEFAULT_BASE = 'http://192.168.1.1:8200';
     var SERVICE = 'urn:schemas-upnp-org:service:ContentDirectory:1';
@@ -27,6 +32,7 @@
     var currentRequest = null;
     var browseToken = 0;
     var activeMenuClose = null;
+    var activeNativeMenu = null;
     var playerReturnController = null;
     var keypadBackHandlerAttached = false;
     var keypadBackHandlerActive = false;
@@ -180,7 +186,7 @@
         try {
             Lampa.SettingsApi.addComponent({
                 component: COMPONENT,
-                name: 'DLNA Bridge 0.5.9.2',
+                name: 'DLNA Bridge 0.6.0',
                 icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
             });
             setRegistrationState(name, 'registered');
@@ -235,7 +241,7 @@
         }
         try {
             Lampa.Lang.add({
-                dlna_bridge_title: { ru: 'DLNA Bridge 0.5.9.2', en: 'DLNA Bridge 0.5.9.2' },
+                dlna_bridge_title: { ru: 'DLNA Bridge 0.6.0', en: 'DLNA Bridge 0.6.0' },
                 dlna_bridge_server: { ru: 'Адрес DLNA-сервера', en: 'DLNA server address' },
                 dlna_bridge_open: { ru: 'Открыть каталог DLNA', en: 'Open DLNA catalog' },
                 dlna_bridge_clear: { ru: 'Очистить кеш каталога', en: 'Clear catalog cache' },
@@ -823,10 +829,26 @@
         page();
     }
 
+    // Legacy UI below is isolated for regression/rollback; openCatalog() uses only DlnaBrowser.
+    function nativeSelectVisibility() {
+        var select = window.Lampa && Lampa.Select;
+        try {
+            if (!select || typeof select.opened !== 'function') return null;
+            var visible = select.opened();
+            return typeof visible === 'boolean' ? visible : null;
+        } catch (visibilityError) { return null; }
+    }
+
+    function dismissNativeSelect() {
+        if (Lampa.Select && typeof Lampa.Select.closeAll === 'function') Lampa.Select.closeAll();
+        else if (Lampa.Select && typeof Lampa.Select.close === 'function') Lampa.Select.close();
+    }
+
     function hasNativeSelectApi() {
         var select = window.Lampa && Lampa.Select;
         var controller = window.Lampa && Lampa.Controller;
-        return !!(select && typeof select.show === 'function' && controller &&
+        return !!(select && typeof select.show === 'function' && nativeSelectVisibility() !== null &&
+            (typeof select.closeAll === 'function' || typeof select.close === 'function') && controller &&
             typeof controller.add === 'function' && typeof controller.toggle === 'function' &&
             typeof controller.enabled === 'function' &&
             typeof controller.windowOpen === 'function' && typeof controller.windowClose === 'function' &&
@@ -836,6 +858,8 @@
 
     function openSelect(title, entries, onSelect, onBack) {
         var previousController = '';
+        var nativeState = 'open';
+        var nativeMenu = { suspend: suspendNative, resume: resumeNative, retire: retireNative };
         try {
             var enabledController = Lampa.Controller.enabled();
             if (enabledController && enabledController.name) previousController = enabledController.name;
@@ -863,7 +887,70 @@
             if (onBack) onBack();
         }
 
+        function ownsNative() {
+            return (nativeState === 'open' || nativeState === 'pending') &&
+                activeNativeMenu === nativeMenu &&
+                activeMenuClose === (nativeState === 'pending' ? closePendingNative : closeNative);
+        }
+
+        function isCurrentNative() {
+            return nativeState === 'open' && ownsNative();
+        }
+
+        // Menu ownership is independent of asynchronous Browse generations.
+        function finishNative(state) {
+            if (!ownsNative()) return false;
+            nativeState = state;
+            activeNativeMenu = null;
+            activeMenuClose = null;
+            deactivateKeypadBackDiagnostic();
+            return true;
+        }
+
+        function suspendNative() {
+            if (isCurrentNative()) {
+                nativeState = 'pending';
+                activeMenuClose = closePendingNative;
+            }
+        }
+
+        function resumeNative() {
+            if (!ownsNative()) return;
+            var recoveryToken = browseToken;
+            // Never revive a suspended instance: opened() may report stale visibility.
+            if (!finishNative('closed')) return;
+            var useDom = false;
+            try { dismissNativeSelect(); } catch (closeError) { useDom = true; }
+            if (activeMenuClose || recoveryToken !== browseToken) return;
+            restoreController();
+            if (activeMenuClose || recoveryToken !== browseToken) return;
+            // Reuse the loaded rows, not the old callbacks; recovery needs no Browse.
+            if (useDom || !hasNativeSelectApi()) openSelectDom(title, entries, selectItem, backFromSelect);
+            else openSelect(title, entries, onSelect, onBack);
+        }
+
+        function retireNative() {
+            finishNative('closed');
+        }
+
+        function closeNative() {
+            if (isCurrentNative()) closeOwnedNative();
+        }
+
+        function closePendingNative() {
+            if (nativeState === 'pending' && ownsNative()) closeOwnedNative();
+        }
+
+        function closeOwnedNative() {
+            // The active close handle remains usable during a pending Browse.
+            if (!finishNative('closed')) return;
+            invalidateBrowseRequests();
+            // Programmatic dismissal must not navigate through onBack.
+            dismissNativeSelect();
+        }
+
         if (!hasNativeSelectApi()) {
+            if (activeNativeMenu) activeNativeMenu.retire();
             openSelectDom(title, entries, selectItem, backFromSelect);
             return;
         }
@@ -875,8 +962,8 @@
                     subtitle: entry.subtitle || '',
                     entry: entry.entry || entry,
                     onSelect: function () {
-                        activeMenuClose = null;
-                        deactivateKeypadBackDiagnostic();
+                        if (!isCurrentNative() || !validateMenuSelection(entry)) return;
+                        if (!finishNative('selected')) return;
                         selectItem(entry);
                     }
                 };
@@ -886,13 +973,9 @@
             backDiagnosticElement = diagnostic;
             renderBackDiagnostics();
 
-            activeMenuClose = function () {
-                activeMenuClose = null;
-                invalidateBrowseRequests();
-                deactivateKeypadBackDiagnostic();
-                if (Lampa.Select && typeof Lampa.Select.closeAll === 'function') Lampa.Select.closeAll();
-                else if (Lampa.Select && typeof Lampa.Select.close === 'function') Lampa.Select.close();
-            };
+            if (activeNativeMenu) activeNativeMenu.retire();
+            activeNativeMenu = nativeMenu;
+            activeMenuClose = closeNative;
             activateKeypadBackDiagnostic();
             Lampa.Select.show({
                 title: title,
@@ -901,21 +984,17 @@
                     try { scroll.append(window.$(diagnostic)); } catch (e) {}
                 },
                 onBack: function () {
-                    activeMenuClose = null;
-                    deactivateKeypadBackDiagnostic();
+                    if (!isCurrentNative() || !finishNative('back')) return;
                     backFromSelect();
                 }
             });
         } catch (e) {
-            activeMenuClose = null;
-            deactivateKeypadBackDiagnostic();
-            try {
-                if (Lampa.Select && typeof Lampa.Select.opened === 'function' && Lampa.Select.opened()) {
-                    notify('Ошибка при открытии Lampa.Select: ' + errorText(e), 'error');
-                    return;
-                }
-            } catch (openedError) {}
-            notify('Lampa.Select недоступен, открываю резервное меню: ' + errorText(e), 'warning');
+            if (!ownsNative()) return;
+            finishNative('closed');
+            try { dismissNativeSelect(); } catch (closeError) {}
+            if (activeMenuClose) return;
+            restoreController();
+            if (activeMenuClose) return;
             openSelectDom(title, entries, selectItem, backFromSelect);
         }
     }
@@ -1110,7 +1189,7 @@
         });
     }
 
-    function play(entry, selectedResource) {
+    function play(entry, selectedResource, playbackLifecycle) {
         var playUrl = playbackUrl(entry, selectedResource);
         // Final validation is mandatory even after a menu preflight.
         if (!validatePlaybackUrl(playUrl)) return;
@@ -1128,28 +1207,35 @@
         }
         try {
             var currentController = Lampa.Controller && typeof Lampa.Controller.enabled === 'function' ? Lampa.Controller.enabled() : null;
-            playerReturnController = currentController && currentController.name ? currentController.name : null;
-            if (playerReturnController && typeof Lampa.Player.callback === 'function') {
-                Lampa.Player.callback(function () {
-                    var returnTo = playerReturnController;
-                    if (returnTo && Lampa.Controller && typeof Lampa.Controller.toggle === 'function') {
-                        try {
-                            Lampa.Controller.toggle(returnTo);
-                            playerReturnController = null;
-                        } catch (controllerError) {
-                            playerReturnController = returnTo;
+            if (playbackLifecycle) {
+                if (typeof Lampa.Player.callback === 'function') Lampa.Player.callback(playbackLifecycle.returned);
+            } else {
+                playerReturnController = currentController && currentController.name ? currentController.name : null;
+                if (playerReturnController && typeof Lampa.Player.callback === 'function') {
+                    Lampa.Player.callback(function () {
+                        var returnTo = playerReturnController;
+                        if (returnTo && Lampa.Controller && typeof Lampa.Controller.toggle === 'function') {
+                            try {
+                                Lampa.Controller.toggle(returnTo);
+                                playerReturnController = null;
+                            } catch (controllerError) {
+                                playerReturnController = returnTo;
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
         } catch (controllerError) {}
         try {
-            Lampa.Player.play({
+            var playData = {
                 url: playUrl,
                 title: entry.title,
                 quality: 'DLNA'
-            });
+            };
+            if (playbackLifecycle) playbackLifecycle.data = playData;
+            Lampa.Player.play(playData);
         } catch (e) {
+            if (playbackLifecycle) completePlaybackSession(playbackLifecycle, false);
             playerReturnController = null;
             try {
                 if (typeof Lampa.Player.callback === 'function') Lampa.Player.callback(null);
@@ -1158,8 +1244,9 @@
         }
     }
 
-    function invalidateBrowseRequests() {
+    function invalidateBrowseRequests(skipMenuRecovery) {
         browseToken++;
+        if (!skipMenuRecovery && activeNativeMenu) activeNativeMenu.resume();
     }
 
     function bindSettingsLifecycle() {
@@ -1172,7 +1259,8 @@
             handler = function (event) {
                 // Settings emits open for its main screen and each component.
                 // Leaving this plugin's settings component invalidates an in-flight Browse.
-                if (!event || event.name !== COMPONENT) invalidateBrowseRequests();
+                // The Activity owns cancellation while the component exists.
+                if (!activeBrowser && (!event || event.name !== COMPONENT)) invalidateBrowseRequests();
             };
             guardState.settingsLifecycleHandler = handler;
         }
@@ -1206,15 +1294,27 @@
     }
 
     function showFolder(objectId, title, parents) {
+        var suspendedMenu = activeNativeMenu;
+        if (suspendedMenu) suspendedMenu.suspend();
         var token = ++browseToken;
+        function recoverMenu() {
+            if (suspendedMenu) { suspendedMenu.resume(); return; }
+            // Native/DOM selection may already have hidden the previous menu.
+            if (!activeMenuClose && parents && parents.length) {
+                var parent = parents[parents.length - 1];
+                showFolder(parent.id, parent.title, parents.slice(0, -1));
+            }
+        }
         notify('Загрузка: ' + title);
         browseAll(objectId, function (error, items) {
             if (token !== browseToken) return;
             if (error) {
+                recoverMenu();
                 notify('Ошибка Browse: ' + errorText(error), 'error');
                 return;
             }
             if (!items.length) {
+                recoverMenu();
                 notify('Папка пуста.');
                 return;
             }
@@ -1242,9 +1342,408 @@
         }, token);
     }
 
-    function openCatalog() {
+    function openLegacyCatalog() {
         bindSettingsLifecycle();
         showFolder('0', 'DLNA — ' + baseUrl(), []);
+    }
+
+    function completePlaybackSession(session, restore) {
+        if (!session || pendingPlayback !== session) return;
+        var target = session.restoreOwner;
+        pendingPlayback = null;
+        session.phase = 'finished';
+        session.restoreOwner = null;
+        if (target && typeof target.playbackFinished === 'function') target.playbackFinished(session, restore);
+    }
+
+    function handlePlayerExternal(data) {
+        var session = pendingPlayback;
+        if (!session || session.data !== data || session.phase === 'finished') return;
+        session.phase = 'external';
+        if (session.restoreOwner && typeof session.restoreOwner.playbackChanged === 'function') {
+            session.restoreOwner.playbackChanged(session);
+        }
+    }
+
+    // Global Player lifecycle listeners are intentionally plugin-lifetime subscriptions.
+    // They are registered once per GUARD and are not removed, so listener.remove is not required.
+    function registerPlayerExternalListener() {
+        var name = 'playerExternalListener';
+        var state = registrationState(name);
+        var listener = Lampa.Player && Lampa.Player.listener;
+        var handler = guardState.playerExternalHandler;
+        if (typeof handler !== 'function') {
+            handler = function (data) { handlePlayerExternal(data); };
+            guardState.playerExternalHandler = handler;
+        }
+        if (!listener || typeof listener.follow !== 'function') return;
+        if (state === 'registered') return;
+        if (state === 'uncertain') {
+            if (typeof listener.has !== 'function') return;
+            try {
+                if (listener.has('external', handler)) {
+                    setRegistrationState(name, 'registered');
+                    return;
+                }
+                setRegistrationState(name, 'pending');
+            } catch (hasError) { return; }
+        }
+        setRegistrationState(name, 'uncertain');
+        try {
+            listener.follow('external', handler);
+            setRegistrationState(name, 'registered');
+        } catch (error) {
+            logRegistrationError('Подписка Player.external завершилась исключением', error);
+            if (typeof listener.has === 'function') {
+                try {
+                    if (listener.has('external', handler)) setRegistrationState(name, 'registered');
+                    else setRegistrationState(name, 'pending');
+                } catch (hasError) {}
+            }
+        }
+    }
+
+    // Callback identity belongs to one playback, never a mutable component or controller.
+    function playbackReturnCallback(session) {
+        return function () {
+            completePlaybackSession(session, true);
+        };
+    }
+
+    // Original ES5 Activity implementation; no third-party component source is embedded.
+    function DlnaBrowser(options) {
+        options = options || {};
+        var self = this;
+        var root = null;
+        var viewport = null;
+        var list = null;
+        var heading = null;
+        var status = null;
+        var rows = [];
+        var destroyed = false;
+        var running = false;
+        var loading = false;
+        var playback = null;
+        var generation = 0;
+        var renderGeneration = 0;
+        var restoringFocus = false;
+        var error = '';
+        var parents = [];
+        var frame = { id: options.objectId || '0', title: options.title || 'DLNA', items: null, index: 0, scroll: 0 };
+        var resourceEntry = null;
+        var resourceIndex = 0;
+        var resourceScroll = 0;
+
+        function current() {
+            if (destroyed || activeBrowser !== self) return false;
+            var activity = Lampa.Activity && typeof Lampa.Activity.active === 'function' ? Lampa.Activity.active() : null;
+            return Lampa.Activity && typeof Lampa.Activity.active === 'function' ?
+                !!activity && activity.activity === self.activity : true;
+        }
+
+        function save() {
+            if (!viewport) return;
+            if (resourceEntry) resourceScroll = viewport.scrollTop || 0;
+            else frame.scroll = viewport.scrollTop || 0;
+        }
+
+        function selectedIndex() { return resourceEntry ? resourceIndex : frame.index; }
+
+        function remember(index) {
+            if (resourceEntry) resourceIndex = index;
+            else frame.index = index;
+        }
+
+        function highlight(index) {
+            var i;
+            for (i = 0; i < rows.length; i++) {
+                rows[i].style.background = i === index ? 'rgba(80,145,220,.38)' : 'rgba(128,128,128,.14)';
+                rows[i].style.outline = i === index ? '2px solid #8fc7ff' : 'none';
+            }
+        }
+
+        function focus(index, restore) {
+            if (!running || !current() || !rows.length) return;
+            index = Math.max(0, Math.min(index, rows.length - 1));
+            remember(index);
+            highlight(index);
+            var position = resourceEntry ? resourceScroll : frame.scroll;
+            restoringFocus = !!restore;
+            try {
+                Lampa.Controller.collectionSet(window.$(root));
+                Lampa.Controller.collectionFocus(rows[index], window.$(root));
+                if (restore) viewport.scrollTop = position;
+                else if (rows[index].offsetTop < viewport.scrollTop) viewport.scrollTop = rows[index].offsetTop;
+                else if (rows[index].offsetTop + rows[index].offsetHeight > viewport.scrollTop + viewport.clientHeight) {
+                    viewport.scrollTop = rows[index].offsetTop + rows[index].offsetHeight - viewport.clientHeight;
+                }
+            } finally { restoringFocus = false; }
+        }
+
+        function drawStatus() {
+            if (!status) return;
+            status.textContent = loading ? '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430\u2026' :
+                (playback && playback.phase === 'external' ? '\u0412\u043d\u0435\u0448\u043d\u0438\u0439 \u043f\u043b\u0435\u0435\u0440: \u0412\u044b\u0445\u043e\u0434\u0438\u0442\u0435 \u0438\u0437 \u043a\u0430\u0442\u0430\u043b\u043e\u0433\u0430 \u043a\u043d\u043e\u043f\u043a\u043e\u0439 Back; \u0437\u0430\u043f\u0443\u0441\u043a \u043e\u0441\u0442\u0430\u0451\u0442\u0441\u044f \u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d\u043e \u0434\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u043e\u0433\u043e \u0437\u0430\u043a\u0440\u044b\u0442\u0438\u044f' :
+                    (playback && playback.phase === 'launching' ? '\u0417\u0430\u043f\u0443\u0441\u043a \u043f\u043b\u0435\u0435\u0440\u0430: Back \u2014 \u0432 \u043a\u0430\u0442\u0430\u043b\u043e\u0433; \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u044b\u0439 \u0437\u0430\u043f\u0443\u0441\u043a \u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d' : error));
+            status.style.color = error && !loading ? '#ffb080' : '';
+            root.setAttribute('aria-busy', loading ? 'true' : 'false');
+        }
+
+        function renderRows() {
+            if (!root || destroyed) return;
+            var view = ++renderGeneration;
+            while (list.firstChild) {
+                window.$(list.firstChild).off();
+                list.removeChild(list.firstChild);
+            }
+            rows = [];
+            heading.textContent = resourceEntry ? resourceEntry.title : frame.title;
+            var items = resourceEntry ? resourceEntry.resources : (frame.items || []);
+            var empty = !items.length;
+            var count = empty ? 1 : items.length;
+            var i;
+            for (i = 0; i < count; i++) {
+                (function (index) {
+                    var item = items[index];
+                    var row = document.createElement('div');
+                    row.className = 'selector dlna-browser-row';
+                    row.tabIndex = 0;
+                    row.style.cssText = 'padding:16px 20px;margin:6px 0;border-radius:8px;background:rgba(128,128,128,.14);white-space:pre-wrap;';
+                    if (empty) row.textContent = frame.items === null ? '\u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u044c' : '\u041f\u0443\u0441\u0442\u0430\u044f \u043f\u0430\u043f\u043a\u0430. \u041d\u0430\u0437\u0430\u0434';
+                    else if (resourceEntry) row.textContent = '\u0420\u0435\u0441\u0443\u0440\u0441 ' + (index + 1) + '\n' + formatResourceSubtitle(item);
+                    else row.textContent = (item.isFolder ? '\u25a3 ' : '\u25b6 ') + item.title + (item.isFolder ? '' : '\n' + formatResourceSubtitle(item));
+                    window.$(row).on('hover:enter click', function () {
+                        if (view === renderGeneration) self.select(index);
+                    });
+                    window.$(row).on('hover:focus', function () {
+                        if (view !== renderGeneration || destroyed || !running || !current()) return;
+                        remember(index);
+                        highlight(index);
+                        if (!restoringFocus) save();
+                    });
+                    list.appendChild(row);
+                    rows.push(row);
+                })(i);
+            }
+            drawStatus();
+            focus(selectedIndex(), true);
+        }
+
+        function cancelLoad() {
+            if (!loading) return;
+            generation++;
+            loading = false;
+            if (activeBrowser === self) browseToken++;
+            error = '';
+            drawStatus();
+        }
+
+        function load(id, title, forward) {
+            if (!current()) return;
+            save();
+            cancelLoad();
+            loading = true;
+            error = '';
+            var requestGeneration = ++generation;
+            var token = ++browseToken;
+            drawStatus();
+            browseAll(id, function (browseError, items) {
+                if (!current() || destroyed || requestGeneration !== generation || token !== browseToken) return;
+                loading = false;
+                if (browseError) {
+                    error = '\u041e\u0448\u0438\u0431\u043a\u0430 Browse: ' + errorText(browseError);
+                    drawStatus();
+                    focus(selectedIndex(), true);
+                    return;
+                }
+                if (forward) parents.push(frame);
+                frame = { id: id, title: title, items: items, index: 0, scroll: 0 };
+                resourceEntry = null;
+                error = '';
+                renderRows();
+            }, token);
+        }
+
+        function launch(entry, resource) {
+            if (!validatePlaybackUrl(playbackUrl(entry, resource))) return;
+            if (!Lampa.Player || typeof Lampa.Player.play !== 'function') {
+                notify('Lampa.Player.play unavailable', 'error');
+                return;
+            }
+            if (pendingPlayback) {
+                notify('DLNA: previous player launch has not completed', 'error');
+                return;
+            }
+            var listener = Lampa.Player.listener;
+            if (!listener || typeof listener.follow !== 'function' ||
+                registrationState('playerCloseListener') !== 'registered' ||
+                registrationState('playerExternalListener') !== 'registered') {
+                notify('DLNA: Player listener API unavailable; cannot safely track playback lifecycle', 'error');
+                return;
+            }
+            save();
+            var session = { phase: 'launching', data: null, restoreOwner: self };
+            session.returned = playbackReturnCallback(session);
+            playback = session;
+            pendingPlayback = session;
+            play(entry, resource, session);
+            drawStatus();
+        }
+
+        function controllerName() {
+            var enabled = Lampa.Controller && typeof Lampa.Controller.enabled === 'function' ? Lampa.Controller.enabled() : null;
+            return enabled && enabled.name;
+        }
+
+        this.playbackChanged = function (session) {
+            if (playback !== session || destroyed) return;
+            drawStatus();
+        };
+
+        this.playbackFinished = function (session, restore) {
+            if (playback !== session) return;
+            playback = null;
+            drawStatus();
+            if (!restore || !running || !current()) return;
+            var name = controllerName();
+            // Never dismiss Settings or another overlay to restore a player session.
+            if (name === 'content') focus(selectedIndex(), true);
+            else if (name === 'player' || name === 'player-loading' || name === 'player_panel' ||
+                name === 'player_rewind' || name === 'player_footer') Lampa.Controller.toggle('content');
+        };
+
+        this.playerClosed = function (event) {
+            if (playback && event && event.data === playback.data && playback.data) completePlaybackSession(playback, true);
+        };
+
+        this.create = function () {
+            if (root || destroyed) return;
+            root = document.createElement('div');
+            root.className = 'dlna-browser';
+            root.style.cssText = 'padding:24px;box-sizing:border-box;width:100%;height:100%;';
+            heading = document.createElement('div');
+            heading.style.cssText = 'font-size:28px;padding:0 12px 12px;';
+            status = document.createElement('div');
+            status.setAttribute('role', 'status');
+            status.style.cssText = 'min-height:30px;padding:0 12px;white-space:pre-wrap;';
+            viewport = document.createElement('div');
+            viewport.style.cssText = 'overflow:auto;height:70vh;padding:4px 12px;';
+            list = document.createElement('div');
+            viewport.appendChild(list);
+            root.appendChild(heading);
+            root.appendChild(status);
+            root.appendChild(viewport);
+            viewport.addEventListener('scroll', save);
+            renderRows();
+            if (self.activity && typeof self.activity.loader === 'function') self.activity.loader(false);
+        };
+
+        this.start = function () {
+            if (destroyed) return;
+            var activity = Lampa.Activity && typeof Lampa.Activity.active === 'function' ? Lampa.Activity.active() : null;
+            if (Lampa.Activity && typeof Lampa.Activity.active === 'function' &&
+                (!activity || activity.activity !== self.activity)) return;
+            if (activeBrowser && activeBrowser !== self) activeBrowser.pause();
+            activeBrowser = self;
+            running = true;
+            if (pendingPlayback) {
+                playback = pendingPlayback;
+                pendingPlayback.restoreOwner = self;
+            }
+            self.create();
+            Lampa.Controller.add('content', {
+                toggle: function () { focus(selectedIndex(), true); },
+                up: function () { focus(selectedIndex() - 1, false); },
+                down: function () { focus(selectedIndex() + 1, false); },
+                left: function () { if (!loading) Lampa.Controller.toggle('menu'); },
+                right: function () {},
+                enter: function () { self.select(selectedIndex()); },
+                back: function () { self.back(); }
+            });
+            Lampa.Controller.toggle('content');
+            if (frame.items === null && !loading) load(frame.id, frame.title, false);
+            else focus(selectedIndex(), true);
+        };
+
+        this.select = function (index) {
+            if (!running || !current() || loading) return;
+            var items = resourceEntry ? resourceEntry.resources : (frame.items || []);
+            if (!items.length) {
+                if (frame.items === null) load(frame.id, frame.title, false);
+                else self.back();
+                return;
+            }
+            if (index < 0 || index >= items.length) return;
+            remember(index);
+            var entry = items[index];
+            if (resourceEntry) launch(resourceEntry, entry);
+            else if (entry.isFolder) load(entry.id, entry.title, true);
+            else if (entry.resources && entry.resources.length > 1) {
+                save();
+                resourceEntry = entry;
+                resourceIndex = 0;
+                resourceScroll = 0;
+                renderRows();
+            } else launch(entry, null);
+        };
+
+        this.back = function () {
+            if (!running || !current()) return;
+            // Back navigates normally while playback is unconfirmed; it never releases the global launch lock.
+            if (loading) { cancelLoad(); focus(selectedIndex(), true); return; }
+            save();
+            if (resourceEntry) { resourceEntry = null; renderRows(); return; }
+            if (parents.length) { frame = parents.pop(); error = ''; renderRows(); }
+            else { self.pause(); Lampa.Activity.backward(); }
+        };
+
+        this.refresh = function () {
+            if (current() && !resourceEntry) load(frame.id, frame.title, false);
+        };
+
+        this.pause = function () {
+            save(); cancelLoad(); running = false;
+            if (playback && playback.restoreOwner === self) playback.restoreOwner = null;
+        };
+        this.stop = this.pause;
+        this.isCurrent = current;
+        this.render = function (asDom) { self.create(); return asDom ? root : window.$(root); };
+        this.destroy = function () {
+            if (destroyed) return;
+            self.pause();
+            destroyed = true;
+            generation++;
+            renderGeneration++;
+            if (activeBrowser === self) {
+                activeBrowser = null;
+                if (playerReturnController === 'content') playerReturnController = null;
+            }
+            if (viewport) viewport.removeEventListener('scroll', save);
+            if (root) {
+                window.$(root).find('.selector').off();
+                if (root.parentNode) root.parentNode.removeChild(root);
+            }
+            rows = [];
+            parents = [];
+            resourceEntry = null;
+        };
+    }
+
+    function openCatalog() {
+        if (!Lampa.Component || typeof Lampa.Component.add !== 'function' || !Lampa.Activity ||
+            typeof Lampa.Activity.push !== 'function' || !Lampa.Controller ||
+            typeof Lampa.Controller.add !== 'function' || typeof Lampa.Controller.toggle !== 'function' ||
+            typeof Lampa.Controller.collectionSet !== 'function' || typeof Lampa.Controller.collectionFocus !== 'function' ||
+            typeof Lampa.Activity.backward !== 'function' || typeof window.$ !== 'function') {
+            notify('Lampa Component/Activity API unavailable', 'error');
+            return;
+        }
+        if (activeBrowser && activeBrowser.isCurrent()) { activeBrowser.start(); return; }
+        if (!browserRegistered) {
+            Lampa.Component.add(BROWSER_COMPONENT, DlnaBrowser);
+            browserRegistered = true;
+        }
+        Lampa.Activity.push({ component: BROWSER_COMPONENT, title: 'DLNA', objectId: '0' });
     }
 
     function registerPlayerCloseListener(retryAfterConfirmedMissing) {
@@ -1254,8 +1753,16 @@
         var listener = Lampa.Player && Lampa.Player.listener;
         var handler = guardState.playerCloseHandler;
         if (typeof handler !== 'function') {
-            handler = function () {
-                invalidateBrowseRequests();
+            handler = function (event) {
+                if (pendingPlayback) {
+                    if (event && event.data === pendingPlayback.data && pendingPlayback.data) {
+                        completePlaybackSession(pendingPlayback, true);
+                    }
+                    return;
+                }
+                if (activeBrowser) { activeBrowser.playerClosed(event); return; }
+                // The current owner is about to be closed, not recovered.
+                invalidateBrowseRequests(true);
                 if (activeMenuClose) activeMenuClose();
                 var staleMenu = document.getElementById('dlna-bridge-menu');
                 if (staleMenu && staleMenu.parentNode) staleMenu.parentNode.removeChild(staleMenu);
@@ -1318,6 +1825,7 @@
 
         try {
             registerPlayerCloseListener();
+            registerPlayerExternalListener();
             bindSettingsLifecycle();
             addTranslations();
 
