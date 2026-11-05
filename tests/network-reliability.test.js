@@ -159,10 +159,48 @@ function didl(entries) {
     return xml + '</DIDL-Lite>';
 }
 
+// DOM used only when the production capability check chooses fallback.
+function fallbackDom() {
+    var listeners = { keydown: [], keyup: [] };
+    var dom = {};
+    function element(tag) {
+        return {
+            tag: tag, style: {}, children: [], events: {}, parentNode: null,
+            appendChild: function (child) { this.children.push(child); child.parentNode = this; },
+            removeChild: function (child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; },
+            addEventListener: function (type, callback) { this.events[type] = callback; },
+            focus: function () { dom.document.activeElement = this; if (this.events.focus) this.events.focus(); },
+            scrollIntoView: function () {}
+        };
+    }
+    function all(node) {
+        var result = [node];
+        node.children.forEach(function (child) { result = result.concat(all(child)); });
+        return result;
+    }
+    dom.document = {
+        body: element('body'), activeElement: null, createElement: element,
+        getElementById: function (id) { return all(this.body).filter(function (node) { return node.id === id; })[0] || null; }
+    };
+    dom.add = function (type, callback) { listeners[type].push(callback); };
+    dom.remove = function (type, callback) { listeners[type] = listeners[type].filter(function (item) { return item !== callback; }); };
+    dom.key = function (key) {
+        listeners.keydown.slice().forEach(function (callback) {
+            callback({ key: key, preventDefault: function () {}, stopPropagation: function () {}, stopImmediatePropagation: function () {} });
+        });
+    };
+    dom.count = function (type) { return listeners[type].length; };
+    dom.overlay = function () { return dom.document.getElementById('dlna-bridge-menu'); };
+    dom.buttons = function () { return all(dom.document.body).filter(function (node) { return node.tag === 'button'; }); };
+    return dom;
+}
+
 function createHarness(options) {
     options = options || {};
     var requests = [];
     var timers = [];
+    var nextTimer = 0;
+    var dom = fallbackDom();
     var selects = [];
     var played = [];
     var notices = [];
@@ -173,7 +211,7 @@ function createHarness(options) {
     var source = fs.readFileSync(path.join(__dirname, '..', 'plugin.js'), 'utf8');
     source = source.replace(
         'if (window.appready) init();',
-        'window.__test = { init: init, requestNative: requestNative, soapBrowse: soapBrowse, browseAll: browseAll, showFolder: showFolder, openCatalog: openCatalog, play: play, cache: cache }; if (window.appready) init();'
+        'window.__test = { init: init, requestNative: requestNative, soapBrowse: soapBrowse, browseAll: browseAll, showFolder: showFolder, openCatalog: openLegacyCatalog, play: play, cache: cache, closeMenu: function () { if (activeMenuClose) activeMenuClose(); }, menuCloser: function () { return activeMenuClose; }, browseGeneration: function () { return browseToken; } }; if (window.appready) init();'
     );
 
     function Reguest() {
@@ -214,22 +252,25 @@ function createHarness(options) {
             collectionSet: function () {},
             collectionFocus: function () {}
         },
-        Select: { show: function (config) { selects.push(config); } },
-        Player: { play: function (entry) { played.push(entry); }, callback: function () {} },
+        Select: { opened: function () { return true; }, close: function () {}, show: function (config) { selects.push(config); } },
+        Player: { listener: createListener(), play: function (entry) { played.push(entry); }, callback: function () {} },
         Noty: { show: function (message) { notices.push(message); } }
     };
-    var window = { Lampa: Lampa, appready: false, $: function (value) { return value; }, DOMParser: HarnessDOMParser };
-    var document = {
-        getElementById: function () { return null; },
-        createElement: function () { return { style: {}, textContent: '' }; }
-    };
+    if (Object.prototype.hasOwnProperty.call(options, 'opened')) Lampa.Select.opened = options.opened;
+    var window = { Lampa: Lampa, appready: false, $: function (value) { return value; }, DOMParser: HarnessDOMParser,
+        addEventListener: dom.add, removeEventListener: dom.remove };
+    var document = dom.document;
     var context = {
         window: window,
         Lampa: Lampa,
         document: document,
         DOMParser: HarnessDOMParser,
         console: { log: function () {}, error: function () {} },
-        setTimeout: function (callback, delay) { timers.push({ callback: callback, delay: delay }); return timers.length; }
+        setTimeout: function (callback, delay) { var id = ++nextTimer; timers.push({ callback: callback, delay: delay, id: id }); return id; },
+        clearTimeout: function (id) {
+            var i;
+            for (i = timers.length - 1; i >= 0; i--) if (timers[i].id === id) timers.splice(i, 1);
+        }
     };
     vm.runInNewContext(source, context);
     window.__test.init();
@@ -245,11 +286,13 @@ function createHarness(options) {
 
     return {
         requests: requests,
+        dom: dom,
         timers: timers,
         selects: selects,
         played: played,
         notices: notices,
         settingsListener: settingsListener,
+        playerListener: Lampa.Player.listener,
         parserCalls: function () { return parserCalls; },
         Lampa: Lampa,
         test: window.__test,
@@ -747,4 +790,631 @@ test('passes the original DIDL resource URL to Lampa.Player.play without fetchin
     assert.strictEqual(harness.played.length, 1);
     assert.strictEqual(harness.played[0].url, url);
     assert.strictEqual(harness.requests.length, 0);
+});
+
+// Native Select lifecycle: callbacks remain callable even after their menu is hidden.
+function navigationHarness() {
+    var harness = createHarness();
+    var originalShow = harness.Lampa.Select.show;
+    harness.nativeVisible = false;
+    harness.Lampa.Select.opened = function () { return harness.nativeVisible; };
+    harness.Lampa.Select.show = function (config) {
+        harness.nativeVisible = true;
+        originalShow(config);
+        harness.Lampa.Controller.toggle('select');
+    };
+    harness.currentMenu = function () { return harness.selects[harness.selects.length - 1]; };
+    harness.ok = function (menu, index) {
+        // Native Select hides before dispatching the selected item's callback.
+        harness.nativeVisible = false;
+        harness.Lampa.Controller.toggle('settings_component');
+        menu.items[index || 0].onSelect();
+    };
+    harness.folderResponse = function (request, entries) {
+        request.success(soapResponse(didl(entries), entries.length));
+    };
+    harness.test.showFolder('0', 'Root', []);
+    var root = harness.popRequest();
+    assert.match(root.body, /<ObjectID>0<\/ObjectID>/);
+    harness.folderResponse(root, [{ id: 'A', title: 'A', isFolder: true }]);
+    return harness;
+}
+
+function enterFolderA(harness) {
+    harness.ok(harness.currentMenu());
+    var request = harness.popRequest();
+    assert.match(request.body, /<ObjectID>A<\/ObjectID>/);
+    harness.folderResponse(request, [{ id: 'B', title: 'B', isFolder: true }]);
+    return harness.currentMenu();
+}
+
+function videoEntries() {
+    return [{ id: 'video', title: 'Video', url: 'http://media/video.mp4' }];
+}
+
+test('native Root -> A -> B -> Video preserves ObjectIDs, Back and playback', function () {
+    var harness = navigationHarness();
+    var menuA = enterFolderA(harness);
+    harness.ok(menuA);
+    var requestB = harness.popRequest();
+    assert.match(requestB.body, /<ObjectID>B<\/ObjectID>/);
+    harness.folderResponse(requestB, videoEntries());
+    var menuB = harness.currentMenu();
+    assert.strictEqual(menuB.title, 'B');
+    harness.ok(menuB);
+    assert.strictEqual(harness.played.length, 1);
+    assert.strictEqual(harness.played[0].url, 'http://media/video.mp4');
+    menuB.items[0].onSelect();
+    menuB.onBack();
+    assert.strictEqual(harness.played.length, 1);
+    assert.strictEqual(harness.currentMenu(), menuB);
+    // A freshly opened current menu still accepts a genuine user Back.
+    harness.test.showFolder('B', 'B', [{ id: '0', title: 'Root' }, { id: 'A', title: 'A' }]);
+    harness.currentMenu().onBack();
+    assert.strictEqual(harness.currentMenu().title, 'A');
+    harness.currentMenu().onBack();
+    assert.strictEqual(harness.currentMenu().title, 'Root');
+});
+
+['before response', 'after response', 'cache'].forEach(function (timing) {
+    test('native ignores old onBack after selection: ' + timing, function () {
+        var harness = navigationHarness();
+        var menuA = enterFolderA(harness);
+        if (timing === 'cache') harness.test.cache.B = videoEntries();
+        harness.ok(menuA);
+        var requestB = timing === 'cache' ? null : harness.popRequest();
+        if (timing === 'before response') menuA.onBack();
+        if (requestB) {
+            assert.match(requestB.body, /<ObjectID>B<\/ObjectID>/);
+            harness.folderResponse(requestB, videoEntries());
+        }
+        var menuB = harness.currentMenu();
+        menuA.onBack();
+        menuA.items[0].onSelect();
+        assert.strictEqual(harness.currentMenu(), menuB);
+        assert.strictEqual(menuB.title, 'B');
+        assert.ok(harness.test.cache.B);
+        assert.strictEqual(harness.requests.length, 0);
+        // Stale callbacks must not clear the current menu's close handler.
+        var closed = 0;
+        harness.Lampa.Select.closeAll = function () { closed++; };
+        harness.test.closeMenu();
+        assert.strictEqual(closed, 1);
+    });
+});
+
+test('native double onSelect creates one Browse and keeps its response current', function () {
+    var harness = navigationHarness();
+    var menuA = enterFolderA(harness);
+    harness.ok(menuA);
+    menuA.items[0].onSelect();
+    assert.strictEqual(harness.requests.length, 1);
+    harness.folderResponse(harness.popRequest(), videoEntries());
+    assert.strictEqual(harness.currentMenu().title, 'B');
+});
+
+test('native repeated Back runs parent navigation once and ignores old selections', function () {
+    var harness = navigationHarness();
+    var menuA = enterFolderA(harness);
+    menuA.onBack();
+    var root = harness.currentMenu();
+    menuA.onBack();
+    menuA.items[0].onSelect();
+    assert.strictEqual(harness.currentMenu(), root);
+    assert.strictEqual(root.title, 'Root');
+    assert.strictEqual(harness.requests.length, 0);
+    harness.ok(root);
+    assert.strictEqual(harness.currentMenu().title, 'A');
+});
+
+['close', 'closeAll'].forEach(function (method) {
+    ['synchronous', 'delayed'].forEach(function (timing) {
+        test('native programmatic ' + method + ' suppresses ' + timing + ' Back', function () {
+            var harness = navigationHarness();
+            var menuA = enterFolderA(harness);
+            var queued;
+            var closes = 0;
+            harness.Lampa.Select[method] = function () {
+                closes++;
+                if (timing === 'synchronous') menuA.onBack();
+                else queued = menuA.onBack;
+            };
+            var count = harness.selects.length;
+            harness.test.closeMenu();
+            harness.test.closeMenu();
+            assert.strictEqual(closes, 1);
+            assert.strictEqual(harness.selects.length, count);
+            harness.test.showFolder('0', 'Root', []);
+            var current = harness.currentMenu();
+            if (queued) queued();
+            menuA.items[0].onSelect();
+            assert.strictEqual(harness.currentMenu(), current);
+            assert.strictEqual(harness.requests.length, 0);
+            assert.strictEqual(harness.played.length, 0);
+            harness.test.closeMenu();
+            assert.strictEqual(closes, 2);
+        });
+    });
+});
+
+['selection', 'back'].forEach(function (action) {
+    test('native settles ' + action + ' before reentrant Controller.toggle callbacks', function () {
+        var harness = navigationHarness();
+        var menuA = enterFolderA(harness);
+        var toggle = harness.Lampa.Controller.toggle;
+        var reentered = 0;
+        harness.Lampa.Controller.toggle = function (name) {
+            toggle(name);
+            if (reentered++ === 0) {
+                menuA.onBack();
+                menuA.items[0].onSelect();
+            }
+        };
+        if (action === 'selection') {
+            // Call directly while controller is select to force restoration.
+            menuA.items[0].onSelect();
+            assert.strictEqual(harness.requests.length, 1);
+            harness.folderResponse(harness.popRequest(), videoEntries());
+            assert.strictEqual(harness.currentMenu().title, 'B');
+        } else {
+            menuA.onBack();
+            assert.strictEqual(harness.currentMenu().title, 'Root');
+            assert.strictEqual(harness.requests.length, 0);
+        }
+        assert.ok(reentered > 0);
+    });
+});
+
+['before response', 'after response', 'cache'].forEach(function (timing) {
+    ['back', 'select', 'close'].forEach(function (callback) {
+        test('superseded open native menu ignores ' + callback + ': ' + timing, function () {
+            var harness = navigationHarness();
+            var menuA = enterFolderA(harness);
+            var closeA = harness.test.menuCloser();
+            var closeCalls = 0;
+            harness.Lampa.Select.closeAll = function () { closeCalls++; };
+            if (timing === 'cache') harness.test.cache.B = videoEntries();
+            // Open B independently; A never received selection, Back or close.
+            harness.test.showFolder('B', 'B', [{ id: '0', title: 'Root' }, { id: 'A', title: 'A' }]);
+            var requestB = timing === 'cache' ? null : harness.popRequest();
+            function stale() {
+                if (callback === 'back') menuA.onBack();
+                else if (callback === 'select') menuA.items[0].onSelect();
+                else closeA();
+            }
+            function assertStaleIgnored() {
+                var generation = harness.test.browseGeneration();
+                var closer = harness.test.menuCloser();
+                var count = harness.selects.length;
+                var controller = harness.Lampa.Controller.enabled().name;
+                stale();
+                stale();
+                assert.strictEqual(harness.test.browseGeneration(), generation);
+                assert.strictEqual(harness.test.menuCloser(), closer);
+                assert.strictEqual(harness.selects.length, count);
+                assert.strictEqual(harness.Lampa.Controller.enabled().name, controller);
+                assert.strictEqual(harness.requests.length, 0);
+                assert.strictEqual(closeCalls, 0);
+            }
+            if (timing === 'before response') assertStaleIgnored();
+            if (requestB) {
+                assert.match(requestB.body, /<ObjectID>B<\/ObjectID>/);
+                harness.folderResponse(requestB, videoEntries());
+            }
+            assert.strictEqual(harness.currentMenu().title, 'B');
+            assert.ok(harness.test.cache.B);
+            assertStaleIgnored();
+            harness.ok(harness.currentMenu());
+            assert.strictEqual(harness.played.length, 1);
+            assert.strictEqual(harness.played[0].url, 'http://media/video.mp4');
+            stale();
+            assert.strictEqual(harness.played.length, 1);
+        });
+    });
+});
+
+test('superseded native callbacks during Select.show and later cannot steal new Back', function () {
+    var harness = navigationHarness();
+    var menuA = enterFolderA(harness);
+    var closeA = harness.test.menuCloser();
+    var originalShow = harness.Lampa.Select.show;
+    var generation;
+    var menuB;
+    harness.Lampa.Select.show = function (config) {
+        if (config.title === 'B') {
+            generation = harness.test.browseGeneration();
+            menuA.onBack();
+            menuA.items[0].onSelect();
+            closeA();
+            assert.strictEqual(harness.test.browseGeneration(), generation);
+            menuB = config;
+        }
+        originalShow(config);
+    };
+    harness.test.cache.B = videoEntries();
+    harness.test.showFolder('B', 'B', [{ id: '0', title: 'Root' }, { id: 'A', title: 'A' }]);
+    assert.strictEqual(harness.currentMenu(), menuB);
+    var currentCloser = harness.test.menuCloser();
+    menuA.onBack();
+    menuA.items[0].onSelect();
+    closeA();
+    assert.strictEqual(harness.test.menuCloser(), currentCloser);
+    assert.strictEqual(harness.Lampa.Controller.enabled().name, 'select');
+    menuB.onBack();
+    assert.strictEqual(harness.currentMenu().title, 'A');
+    var currentA = harness.currentMenu();
+    menuB.onBack();
+    menuA.onBack();
+    assert.strictEqual(harness.currentMenu(), currentA);
+    currentA.onBack();
+    assert.strictEqual(harness.currentMenu().title, 'Root');
+    assert.strictEqual(harness.requests.length, 0);
+});
+
+test('native invalid URL leaves current menu Back usable in the lifecycle model', function () {
+    var harness = navigationHarness();
+    harness.test.cache.B = [{ id: 'bad', title: 'Bad', url: 'javascript:alert(1)' }];
+    harness.test.showFolder('B', 'B', [{ id: '0', title: 'Root' }, { id: 'A', title: 'A' }]);
+    var menuB = harness.currentMenu();
+    var generation = harness.test.browseGeneration();
+    var closer = harness.test.menuCloser();
+    harness.ok(menuB);
+    menuB.items[0].onSelect();
+    assert.strictEqual(harness.played.length, 0);
+    assert.strictEqual(harness.test.browseGeneration(), generation);
+    assert.strictEqual(harness.test.menuCloser(), closer);
+    assert.strictEqual(harness.Lampa.Controller.enabled().name, 'settings_component');
+    menuB.onBack();
+    var requestA = harness.popRequest();
+    assert.match(requestA.body, /<ObjectID>A<\/ObjectID>/);
+    harness.folderResponse(requestA, [{ id: 'B', title: 'B', isFolder: true }]);
+    assert.strictEqual(harness.currentMenu().title, 'A');
+    assert.strictEqual(harness.Lampa.Controller.enabled().name, 'select');
+});
+
+function beginIndependentBrowse(harness) {
+    harness.test.showFolder('B', 'B', [{ id: '0', title: 'Root' }, { id: 'A', title: 'A' }]);
+    return harness.popRequest();
+}
+
+function failBrowse(harness, request, outcome) {
+    if (outcome === 'fault') {
+        var fault = '<s:Envelope><s:Body><Fault><faultstring>Denied</faultstring></Fault></s:Body></s:Envelope>';
+        request.success(fault);
+        // SOAP Fault follows the existing three-attempt Browse policy.
+        harness.runTimer();
+        harness.respond(fault);
+        harness.runTimer();
+        harness.respond(fault);
+    } else request.success(soapResponse(didl([]), 0));
+}
+
+['fault', 'empty'].forEach(function (outcome) {
+    ['Back', 'selection'].forEach(function (action) {
+        test('remaining native menu recovers ' + action + ' after Browse ' + outcome, function () {
+            var harness = navigationHarness();
+            var menuA = enterFolderA(harness);
+            var closeA = harness.test.menuCloser();
+            var request = beginIndependentBrowse(harness);
+            var generation = harness.test.browseGeneration();
+            menuA.onBack();
+            menuA.items[0].onSelect();
+            assert.strictEqual(harness.test.browseGeneration(), generation);
+            failBrowse(harness, request, outcome);
+            var recovered = harness.currentMenu();
+            assert.notStrictEqual(recovered, menuA);
+            assert.strictEqual(recovered.title, 'A');
+            assert.strictEqual(harness.nativeVisible, true);
+            assert.strictEqual(harness.Lampa.Controller.enabled().name, 'select');
+            assert.notStrictEqual(harness.test.menuCloser(), closeA);
+            assert.strictEqual(harness.test.browseGeneration(), generation);
+            menuA.onBack();
+            menuA.items[0].onSelect();
+            assert.strictEqual(harness.test.browseGeneration(), generation);
+            if (action === 'Back') {
+                recovered.onBack();
+                assert.strictEqual(harness.currentMenu().title, 'Root');
+                assert.strictEqual(harness.requests.length, 0);
+            } else {
+                harness.ok(recovered);
+                // Empty B was cached by Browse; Fault was not.
+                if (outcome === 'empty') {
+                    assert.strictEqual(harness.requests.length, 0);
+                    assert.ok(harness.test.menuCloser());
+                    assert.strictEqual(harness.currentMenu().title, 'A');
+                } else {
+                    assert.strictEqual(harness.requests.length, 1);
+                    harness.folderResponse(harness.popRequest(), videoEntries());
+                    assert.strictEqual(harness.currentMenu().title, 'B');
+                }
+            }
+        });
+    });
+});
+
+['open menu', 'pending Browse'].forEach(function (phase) {
+    test('Settings invalidation leaves visible native menu manageable: ' + phase, function () {
+        var harness = navigationHarness();
+        var menuA = enterFolderA(harness);
+        var request = phase === 'pending Browse' ? beginIndependentBrowse(harness) : null;
+        var generation = harness.test.browseGeneration();
+        harness.settingsListener.send('open', { name: 'main' });
+        assert.strictEqual(harness.test.browseGeneration(), generation + 1);
+        if (request) harness.folderResponse(request, videoEntries());
+        assert.notStrictEqual(harness.currentMenu(), menuA);
+        assert.strictEqual(harness.currentMenu().title, 'A');
+        assert.strictEqual(harness.nativeVisible, true);
+        var recovered = harness.currentMenu();
+        menuA.onBack();
+        assert.strictEqual(harness.currentMenu(), recovered);
+        recovered.onBack();
+        assert.strictEqual(harness.currentMenu().title, 'Root');
+        assert.strictEqual(harness.Lampa.Controller.enabled().name, 'select');
+        assert.strictEqual(harness.requests.length, 0);
+    });
+});
+
+['open menu', 'changed Browse token', 'pending Browse'].forEach(function (phase) {
+    test('Player.close safely dismisses native menu: ' + phase, function () {
+        var harness = navigationHarness();
+        var menuA = enterFolderA(harness);
+        var request = phase === 'pending Browse' ? beginIndependentBrowse(harness) : null;
+        if (phase === 'changed Browse token') harness.settingsListener.send('open', { name: 'main' });
+        var calls = 0;
+        harness.Lampa.Select.closeAll = function () {
+            calls++;
+            harness.nativeVisible = false;
+            harness.Lampa.Controller.toggle('settings_component');
+            menuA.onBack();
+        };
+        harness.playerListener.send('close');
+        assert.strictEqual(calls, 1);
+        assert.strictEqual(harness.nativeVisible, false);
+        assert.strictEqual(harness.test.menuCloser(), null);
+        assert.strictEqual(harness.Lampa.Controller.enabled().name, 'settings_component');
+        var count = harness.selects.length;
+        var generation = harness.test.browseGeneration();
+        if (request) harness.folderResponse(request, videoEntries());
+        menuA.onBack();
+        menuA.items[0].onSelect();
+        assert.strictEqual(harness.selects.length, count);
+        assert.strictEqual(harness.test.browseGeneration(), generation);
+        assert.strictEqual(harness.requests.length, 0);
+    });
+});
+
+['fault', 'empty', 'Settings'].forEach(function (outcome) {
+    test('hidden native menu is detached on recovery: ' + outcome, function () {
+        var harness = navigationHarness();
+        var menuA = enterFolderA(harness);
+        var request = outcome === 'Settings' ? null : beginIndependentBrowse(harness);
+        harness.nativeVisible = false;
+        if (request) failBrowse(harness, request, outcome);
+        else harness.settingsListener.send('open', { name: 'main' });
+        assert.ok(harness.test.menuCloser());
+        assert.notStrictEqual(harness.currentMenu(), menuA);
+        var generation = harness.test.browseGeneration();
+        menuA.onBack();
+        menuA.items[0].onSelect();
+        assert.strictEqual(harness.test.browseGeneration(), generation);
+        assert.strictEqual(harness.requests.length, 0);
+        harness.test.showFolder('A', 'A', [{ id: '0', title: 'Root' }]);
+        assert.notStrictEqual(harness.currentMenu(), menuA);
+        assert.strictEqual(harness.nativeVisible, true);
+        assert.strictEqual(harness.Lampa.Controller.enabled().name, 'select');
+        harness.currentMenu().onBack();
+        assert.strictEqual(harness.currentMenu().title, 'Root');
+    });
+});
+
+['synchronous', 'delayed'].forEach(function (timing) {
+    test('active pending close handle dismisses owner without Back: ' + timing, function () {
+        var harness = navigationHarness();
+        var menuA = enterFolderA(harness);
+        var request = beginIndependentBrowse(harness);
+        var queued;
+        var calls = 0;
+        harness.Lampa.Select.closeAll = function () {
+            calls++;
+            harness.nativeVisible = false;
+            harness.Lampa.Controller.toggle('settings_component');
+            if (timing === 'synchronous') menuA.onBack();
+            else queued = menuA.onBack;
+        };
+        harness.test.closeMenu();
+        assert.strictEqual(calls, 1);
+        assert.strictEqual(harness.test.menuCloser(), null);
+        assert.strictEqual(harness.nativeVisible, false);
+        var count = harness.selects.length;
+        var generation = harness.test.browseGeneration();
+        if (queued) queued();
+        harness.folderResponse(request, videoEntries());
+        assert.strictEqual(harness.selects.length, count);
+        assert.strictEqual(harness.test.browseGeneration(), generation);
+        assert.strictEqual(harness.Lampa.Controller.enabled().name, 'settings_component');
+        assert.strictEqual(harness.requests.length, 0);
+        harness.test.showFolder('A', 'A', [{ id: '0', title: 'Root' }]);
+        assert.strictEqual(harness.nativeVisible, true);
+        assert.strictEqual(harness.Lampa.Controller.enabled().name, 'select');
+    });
+});
+
+test('obsolete Browse completion cannot resume menu suspended for a newer request', function () {
+    var harness = navigationHarness();
+    var menuA = enterFolderA(harness);
+    var requestB = beginIndependentBrowse(harness);
+    harness.test.showFolder('C', 'C', [{ id: '0', title: 'Root' }]);
+    var requestC = harness.popRequest();
+    var generation = harness.test.browseGeneration();
+    harness.folderResponse(requestB, []);
+    menuA.onBack();
+    menuA.items[0].onSelect();
+    assert.strictEqual(harness.test.browseGeneration(), generation);
+    assert.strictEqual(harness.requests.length, 0);
+    failBrowse(harness, requestC, 'fault');
+    assert.strictEqual(harness.test.browseGeneration(), generation);
+    var recovered = harness.currentMenu();
+    assert.notStrictEqual(recovered, menuA);
+    menuA.onBack();
+    assert.strictEqual(harness.currentMenu(), recovered);
+    recovered.onBack();
+    assert.strictEqual(harness.currentMenu().title, 'Root');
+    assert.strictEqual(harness.Lampa.Controller.enabled().name, 'select');
+});
+
+var unavailableVisibility = [
+    { name: 'missing', value: undefined },
+    { name: 'not a function', value: true },
+    { name: 'throwing', value: function () { throw new Error('opened failed'); } },
+    { name: 'undefined result', value: function () {} },
+    { name: 'null result', value: function () { return null; } },
+    { name: 'string result', value: function () { return 'true'; } },
+    { name: 'numeric result', value: function () { return 1; } },
+    { name: 'object result', value: function () { return {}; } }
+];
+
+function assertFallbackMenu(harness) {
+    assert.ok(harness.dom.overlay());
+    assert.strictEqual(harness.dom.count('keydown'), 1);
+    assert.strictEqual(harness.dom.count('keyup'), 1);
+    assert.strictEqual(harness.dom.document.activeElement, harness.dom.buttons()[0]);
+    assert.ok(harness.test.menuCloser());
+}
+
+unavailableVisibility.forEach(function (visibility) {
+    test('unavailable visibility chooses usable DOM navigation: ' + visibility.name, function () {
+        var harness = createHarness({ opened: visibility.value });
+        harness.test.cache['0'] = [{ id: 'A', title: 'A', isFolder: true }];
+        harness.test.cache.A = [{ id: 'B', title: 'B', isFolder: true }];
+        harness.test.cache.B = videoEntries();
+        harness.test.showFolder('0', 'Root', []);
+        assert.strictEqual(harness.selects.length, 0);
+        assertFallbackMenu(harness);
+        harness.dom.key('Enter'); harness.runTimer();
+        assertFallbackMenu(harness);
+        harness.dom.key('Enter'); harness.runTimer();
+        assertFallbackMenu(harness);
+        harness.dom.key('Escape');
+        assertFallbackMenu(harness);
+        assert.match(harness.dom.buttons()[0].textContent, /B/);
+        harness.dom.key('Enter'); harness.runTimer();
+        harness.dom.key('Enter'); harness.runTimer();
+        assert.strictEqual(harness.played.length, 1);
+        assert.strictEqual(harness.played[0].url, 'http://media/video.mp4');
+        assert.strictEqual(harness.dom.overlay(), null);
+        assert.strictEqual(harness.test.menuCloser(), null);
+        assert.strictEqual(harness.requests.length, 0);
+        harness.test.showFolder('A', 'A', [{ id: '0', title: 'Root' }]);
+        harness.settingsListener.send('open', { name: 'main' });
+        assertFallbackMenu(harness);
+        harness.playerListener.send('close');
+        assert.strictEqual(harness.dom.overlay(), null);
+        assert.strictEqual(harness.test.menuCloser(), null);
+        assert.strictEqual(harness.dom.count('keydown'), 0);
+        assert.strictEqual(harness.dom.count('keyup'), 0);
+    });
+});
+
+['empty', 'fault'].forEach(function (outcome) {
+    test('missing opened DOM selection recovers parent after Browse ' + outcome, function () {
+        var harness = createHarness({ opened: undefined });
+        harness.test.cache['0'] = [{ id: 'A', title: 'A', isFolder: true }];
+        harness.test.cache.A = [{ id: 'B', title: 'B', isFolder: true }];
+        harness.test.showFolder('A', 'A', [{ id: '0', title: 'Root' }]);
+        harness.dom.key('Enter'); harness.runTimer();
+        assert.strictEqual(harness.dom.overlay(), null);
+        failBrowse(harness, harness.popRequest(), outcome);
+        assertFallbackMenu(harness);
+        assert.match(harness.dom.buttons()[0].textContent, /B/);
+        assert.strictEqual(harness.requests.length, 0);
+        assert.strictEqual(harness.timers.length, 0);
+        harness.dom.key('Escape');
+        assertFallbackMenu(harness);
+        assert.match(harness.dom.buttons()[0].textContent, /A/);
+    });
+});
+
+['empty', 'fault', 'Settings'].forEach(function (outcome) {
+    unavailableVisibility.forEach(function (visibility) {
+        test('hidden native recovery uses fresh DOM on ' + outcome + ': ' + visibility.name, function () {
+            var harness = navigationHarness();
+            var menuA = enterFolderA(harness);
+            var closeA = harness.test.menuCloser();
+            var request = outcome === 'Settings' ? null : beginIndependentBrowse(harness);
+            harness.nativeVisible = false;
+            harness.Lampa.Select.opened = visibility.value;
+            if (request) failBrowse(harness, request, outcome);
+            else harness.settingsListener.send('open', { name: 'main' });
+            assertFallbackMenu(harness);
+            assert.notStrictEqual(harness.test.menuCloser(), closeA);
+            var generation = harness.test.browseGeneration();
+            var closer = harness.test.menuCloser();
+            menuA.onBack(); menuA.items[0].onSelect(); closeA();
+            assert.strictEqual(harness.test.browseGeneration(), generation);
+            assert.strictEqual(harness.test.menuCloser(), closer);
+            assert.strictEqual(harness.requests.length, 0);
+            harness.dom.key('Escape');
+            assertFallbackMenu(harness);
+            assert.match(harness.dom.buttons()[0].textContent, /A/);
+            assert.strictEqual(harness.Lampa.Controller.enabled().name, 'settings_component');
+        });
+    });
+});
+
+[true, false].forEach(function (reported) {
+    test('boolean visibility never revives the previous native instance: ' + reported, function () {
+        var harness = navigationHarness();
+        var menuA = enterFolderA(harness);
+        var request = beginIndependentBrowse(harness);
+        harness.nativeVisible = !reported; // Deliberately stale API result.
+        harness.Lampa.Select.opened = function () { return reported; };
+        harness.folderResponse(request, []);
+        var recovered = harness.currentMenu();
+        assert.notStrictEqual(recovered, menuA);
+        assert.strictEqual(recovered.title, 'A');
+        assert.strictEqual(harness.nativeVisible, true);
+        var generation = harness.test.browseGeneration();
+        menuA.onBack(); menuA.items[0].onSelect();
+        assert.strictEqual(harness.test.browseGeneration(), generation);
+        recovered.onBack();
+        assert.strictEqual(harness.currentMenu().title, 'Root');
+        assert.strictEqual(harness.requests.length, 0);
+    });
+});
+
+test('native recovery does not close or replace a newer menu opened during dismissal', function () {
+    var harness = navigationHarness();
+    var menuA = enterFolderA(harness);
+    var request = beginIndependentBrowse(harness);
+    harness.test.cache.C = videoEntries();
+    harness.Lampa.Select.closeAll = function () {
+        harness.nativeVisible = false;
+        menuA.onBack();
+        harness.test.showFolder('C', 'C', [{ id: '0', title: 'Root' }]);
+    };
+    harness.folderResponse(request, []);
+    var menuC = harness.currentMenu();
+    assert.strictEqual(menuC.title, 'C');
+    assert.strictEqual(harness.nativeVisible, true);
+    assert.strictEqual(harness.dom.overlay(), null);
+    var generation = harness.test.browseGeneration();
+    menuA.onBack(); menuA.items[0].onSelect();
+    assert.strictEqual(harness.test.browseGeneration(), generation);
+    harness.ok(menuC);
+    assert.strictEqual(harness.played.length, 1);
+    assert.strictEqual(harness.requests.length, 0);
+});
+
+test('Back while native Browse is pending remains ignored until the real Lampa order is verified', function () {
+    var harness = navigationHarness();
+    var menuA = enterFolderA(harness);
+    var request = beginIndependentBrowse(harness);
+    var generation = harness.test.browseGeneration();
+    harness.nativeVisible = false;
+    harness.Lampa.Controller.toggle('settings_component');
+    menuA.onBack();
+    assert.strictEqual(harness.test.browseGeneration(), generation);
+    harness.folderResponse(request, videoEntries());
+    assert.strictEqual(harness.currentMenu().title, 'B');
+    assert.strictEqual(harness.Lampa.Controller.enabled().name, 'select');
 });

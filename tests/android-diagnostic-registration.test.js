@@ -11,7 +11,7 @@ function createHarness(options) {
     var componentCalls = 0;
     var params = [];
     if (options.existingComponent) {
-        components.push({ component: 'dlna_bridge', name: 'DLNA Bridge 0.5.9.2' });
+        components.push({ component: 'dlna_bridge', name: 'DLNA Bridge 0.6.0' });
     }
     if (options.existingParams) {
         options.existingParams.forEach(function (name) {
@@ -163,6 +163,9 @@ function createHarness(options) {
     };
     var playerListener = {
             follow: function (name, callback) {
+                // This harness verifies close-listener registration; the component's
+                // permanent external listener is a separate plugin-lifetime subscription.
+                if (name !== 'close') return;
                 playerFollowCalls++;
                 if (playerFollowFailuresBefore > 0) {
                     playerFollowFailuresBefore--;
@@ -237,7 +240,7 @@ function createHarness(options) {
         }
     };
     if (Object.prototype.hasOwnProperty.call(options, 'initialGuard')) {
-        window.lampa_dlna_bridge_059 = options.initialGuard;
+        window.lampa_dlna_bridge_060 = options.initialGuard;
     }
     var document = { getElementById: function () { return null; } };
     var context = { window: window, Lampa: Lampa, document: document, console: window.console };
@@ -273,7 +276,7 @@ function createHarness(options) {
         playerCloseHandlerCount: function () { return playerCloseHandlers.length; },
         playerCloseCallback: function (index) { return playerCloseHandlers[index] && playerCloseHandlers[index].callback; },
         guardPlayerCloseHandler: function () {
-            var guard = window.lampa_dlna_bridge_059;
+            var guard = window.lampa_dlna_bridge_060;
             return guard && guard.playerCloseHandler;
         },
         playerCallbacks: playerCallbacks,
@@ -335,8 +338,8 @@ function createHarness(options) {
             if (!Lampa.Storage) Lampa.Storage = { field: function () { return ''; } };
         },
         setAppReady: function (value) { window.appready = value; },
-        guard: function () { return window.lampa_dlna_bridge_059; },
-        state: function () { return window.lampa_dlna_bridge_059; }
+        guard: function () { return window.lampa_dlna_bridge_060; },
+        state: function () { return window.lampa_dlna_bridge_060; }
     };
 }
 
@@ -621,9 +624,9 @@ test('keeps core initialization successful when AndroidJS is inserted before its
     assert.strictEqual(harness.state().initialized, true);
 });
 
-test('uses the 0.5.9.2 component label', function () {
+test('uses the 0.6.0 component label', function () {
     var harness = createHarness();
-    assert.strictEqual(harness.components[0].name, 'DLNA Bridge 0.5.9.2');
+    assert.strictEqual(harness.components[0].name, 'DLNA Bridge 0.6.0');
 });
 
 test('migrates a legacy true guard without duplicating existing settings registrations', function () {

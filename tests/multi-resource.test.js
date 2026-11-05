@@ -122,7 +122,7 @@ function createHarness(dom) {
             add: function () {}, windowOpen: function () {}, windowClose: function () {},
             collectionSet: function () {}, collectionFocus: function () {}
         },
-        Select: { show: function (config) { selects.push(config); } },
+        Select: { opened: function () { return true; }, close: function () {}, show: function (config) { selects.push(config); } },
         Player: { play: function (data) {
             if (dom) assertMenuClosed(dom);
             played.push(data);
