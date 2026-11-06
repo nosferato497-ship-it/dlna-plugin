@@ -22,6 +22,15 @@
     var activeBrowser = null;
     // A Player.play call remains owned by the plugin until an explicit player completion signal.
     var pendingPlayback = null;
+    var PLAYBACK_DIAGNOSTIC_MARKER = 'DLNA PLAYBACK DIAGNOSTICS (LOCAL)';
+    var PLAYBACK_DIAGNOSTIC_LIMIT = 100;
+    var PLAYBACK_DIAGNOSTIC_PAGE_SIZE = 6;
+    var playbackDiagnosticViewSnapshot = null;
+    var playbackDiagnosticViewEnd = 0;
+    var playbackDiagnosticStartedAt = (new Date()).getTime();
+    var playbackDiagnosticSequence = 0;
+    var playbackDiagnosticAttemptSequence = 0;
+    var playbackDiagnosticRecords = [];
     var browserRegistered = false;
     var PREFIX = 'dlna_bridge_';
     var DEFAULT_BASE = 'http://192.168.1.1:8200';
@@ -135,6 +144,165 @@
     function setRegistrationState(name, state) {
         if (!guardState.registrations) guardState.registrations = {};
         guardState.registrations[name] = state;
+    }
+
+    function playbackDiagnosticLabel(value) {
+        if (typeof value !== 'string' || !/^[A-Za-z0-9_.:-]{1,48}$/.test(value)) return 'other';
+        return value;
+    }
+
+    function playbackDiagnosticRecord(eventName, session, reason, dataPresent, identityMatch) {
+        try {
+            var now = (new Date()).getTime();
+            var controller = 'unknown';
+            var activityName = 'unknown';
+            try {
+                var enabled = Lampa.Controller && typeof Lampa.Controller.enabled === 'function' ? Lampa.Controller.enabled() : null;
+                if (enabled && enabled.name) controller = playbackDiagnosticLabel(enabled.name);
+            } catch (controllerError) {}
+            try {
+                var activity = Lampa.Activity && typeof Lampa.Activity.active === 'function' ? Lampa.Activity.active() : null;
+                if (activity && activity.component) activityName = playbackDiagnosticLabel(activity.component);
+            } catch (activityError) {}
+
+            var record = {
+                n: ++playbackDiagnosticSequence,
+                ms: Math.max(0, now - playbackDiagnosticStartedAt),
+                id: session && session.diagnosticId ? session.diagnosticId : 'none',
+                event: playbackDiagnosticLabel(eventName),
+                controller: controller,
+                activity: activityName
+            };
+            if (reason) record.reason = playbackDiagnosticLabel(reason);
+            if (typeof dataPresent === 'boolean') record.data = dataPresent;
+            if (typeof identityMatch === 'boolean' || identityMatch === 'not-checked-no-pending') record.sameData = identityMatch;
+            if (session) {
+                record.phase = playbackDiagnosticLabel(session.phase || 'unknown');
+                record.owner = session.restoreOwner ? (session.restoreOwner === activeBrowser ? 'active' : 'other') : 'none';
+            }
+            while (playbackDiagnosticRecords.length >= PLAYBACK_DIAGNOSTIC_LIMIT) playbackDiagnosticRecords.shift();
+            playbackDiagnosticRecords.push(record);
+        } catch (diagnosticError) {}
+    }
+
+    function playbackDiagnosticLine(record) {
+        var parts = [];
+        if (record.reason) parts.push('reason=' + record.reason);
+        if (record.data !== undefined) parts.push('data=' + (record.data ? 'yes' : 'no'));
+        if (record.sameData !== undefined) {
+            parts.push('sameData=' + (record.sameData === true ? 'yes' : record.sameData === false ? 'no' : record.sameData));
+        }
+        if (record.phase) parts.push('phase=' + record.phase);
+        if (record.owner) parts.push('owner=' + record.owner);
+        parts.push('ctrl=' + record.controller, 'activity=' + record.activity);
+        return '#' + record.n + ' +' + record.ms + 'ms ' + record.event + ' [' + record.id + '] | ' + parts.join(' | ');
+    }
+
+    function showPlaybackDiagnosticPage(previous) {
+        try {
+            if (previous) {
+                if (!playbackDiagnosticViewSnapshot) {
+                    Lampa.Noty.show('Show the playback diagnostic log first.', { time: 30000 });
+                    return;
+                }
+                if (!playbackDiagnosticViewSnapshot.length) {
+                    Lampa.Noty.show('Playback diagnostic log is empty.', { time: 30000 });
+                    return;
+                }
+                if (playbackDiagnosticViewEnd <= 0) {
+                    Lampa.Noty.show('No older playback diagnostic events remain.', { time: 30000 });
+                    return;
+                }
+            } else {
+                playbackDiagnosticViewSnapshot = playbackDiagnosticRecords.slice(0);
+                playbackDiagnosticViewEnd = playbackDiagnosticViewSnapshot.length;
+            }
+
+            if (!playbackDiagnosticViewSnapshot.length) {
+                Lampa.Noty.show('Playback diagnostic log is empty.', { time: 30000 });
+                return;
+            }
+
+            var end = playbackDiagnosticViewEnd;
+            var start = Math.max(0, end - PLAYBACK_DIAGNOSTIC_PAGE_SIZE);
+            var page = playbackDiagnosticViewSnapshot.slice(start, end);
+            playbackDiagnosticViewEnd = start;
+            var lines = [];
+            lines.push('DLNA playback log #' + page[0].n + '-' + page[page.length - 1].n + ' (oldest first)');
+            lines.push('Use Previous events for older records.');
+            lines.push('');
+            page.forEach(function (record) { lines.push(playbackDiagnosticLine(record)); });
+            Lampa.Noty.show(lines.join('<br>'), { time: 30000 });
+        } catch (diagnosticViewError) {
+            try { Lampa.Noty.show('Playback diagnostic log is unavailable.', { style: 'error', time: 30000 }); } catch (diagnosticNoticeError) {}
+        }
+    }
+
+    function showPlaybackDiagnosticLog() {
+        showPlaybackDiagnosticPage(false);
+    }
+
+    function showPreviousPlaybackDiagnosticLog() {
+        showPlaybackDiagnosticPage(true);
+    }
+
+    function clearPlaybackDiagnosticLog() {
+        try { playbackDiagnosticRecords.length = 0; } catch (diagnosticClearError) {}
+        playbackDiagnosticViewSnapshot = null;
+        playbackDiagnosticViewEnd = 0;
+        try {
+            if (Lampa.Noty && typeof Lampa.Noty.show === 'function') {
+                Lampa.Noty.show('Playback diagnostic log cleared (memory only)', { style: 'success' });
+            }
+        } catch (diagnosticNoticeError) {}
+    }
+
+    function registerPlaybackDiagnosticListener(type) {
+        var name = 'playbackDiagnostic_' + type;
+        var state = registrationState(name);
+        var listener = Lampa.Player && Lampa.Player.listener;
+        var handler = guardState[name];
+        if (typeof handler !== 'function') {
+            handler = (function (eventType) {
+                return function (event) {
+                    try {
+                        var data = eventType === 'create' ? (event && event.data) : event;
+                        var session = pendingPlayback;
+                        var sameData = session && session.data ? session.data === data : null;
+                        playbackDiagnosticRecord('player-' + eventType, session, 'observed', !!data, sameData);
+                    } catch (diagnosticHandlerError) {}
+                };
+            })(type);
+            guardState[name] = handler;
+        }
+        if (!listener || typeof listener.follow !== 'function' || state === 'registered') return;
+        if (state === 'uncertain') {
+            if (typeof listener.has !== 'function') return;
+            try {
+                if (listener.has(type, handler)) {
+                    setRegistrationState(name, 'registered');
+                    return;
+                }
+                setRegistrationState(name, 'pending');
+            } catch (hasError) { return; }
+        }
+        setRegistrationState(name, 'uncertain');
+        try {
+            listener.follow(type, handler);
+            setRegistrationState(name, 'registered');
+        } catch (followError) {
+            if (typeof listener.has === 'function') {
+                try {
+                    if (listener.has(type, handler)) setRegistrationState(name, 'registered');
+                    else setRegistrationState(name, 'pending');
+                } catch (hasError) {}
+            }
+        }
+    }
+
+    function registerPlaybackDiagnosticListeners() {
+        try { registerPlaybackDiagnosticListener('create'); } catch (createRegistrationError) {}
+        try { registerPlaybackDiagnosticListener('start'); } catch (startRegistrationError) {}
     }
 
     function logRegistrationError(message, error) {
@@ -1208,7 +1376,11 @@
         try {
             var currentController = Lampa.Controller && typeof Lampa.Controller.enabled === 'function' ? Lampa.Controller.enabled() : null;
             if (playbackLifecycle) {
-                if (typeof Lampa.Player.callback === 'function') Lampa.Player.callback(playbackLifecycle.returned);
+                if (typeof Lampa.Player.callback === 'function') {
+                    playbackDiagnosticRecord('callback-register', playbackLifecycle, 'attempt');
+                    Lampa.Player.callback(playbackLifecycle.returned);
+                    playbackDiagnosticRecord('callback-register', playbackLifecycle, 'setter-returned');
+                } else playbackDiagnosticRecord('callback-register', playbackLifecycle, 'api-unavailable');
             } else {
                 playerReturnController = currentController && currentController.name ? currentController.name : null;
                 if (playerReturnController && typeof Lampa.Player.callback === 'function') {
@@ -1233,9 +1405,11 @@
                 quality: 'DLNA'
             };
             if (playbackLifecycle) playbackLifecycle.data = playData;
+            if (playbackLifecycle) playbackDiagnosticRecord('player-play-before', playbackLifecycle, 'call');
             Lampa.Player.play(playData);
+            if (playbackLifecycle) playbackDiagnosticRecord('player-play-after', playbackLifecycle, 'returned');
         } catch (e) {
-            if (playbackLifecycle) completePlaybackSession(playbackLifecycle, false);
+            if (playbackLifecycle) completePlaybackSession(playbackLifecycle, false, 'player-play-threw');
             playerReturnController = null;
             try {
                 if (typeof Lampa.Player.callback === 'function') Lampa.Player.callback(null);
@@ -1347,17 +1521,24 @@
         showFolder('0', 'DLNA — ' + baseUrl(), []);
     }
 
-    function completePlaybackSession(session, restore) {
-        if (!session || pendingPlayback !== session) return;
+    function completePlaybackSession(session, restore, reason) {
+        if (!session || pendingPlayback !== session) {
+            playbackDiagnosticRecord('completion-rejected', session, reason || 'session-not-current');
+            return;
+        }
         var target = session.restoreOwner;
+        playbackDiagnosticRecord('completion-accepted', session, reason || 'unspecified');
         pendingPlayback = null;
         session.phase = 'finished';
         session.restoreOwner = null;
+        playbackDiagnosticRecord('pending-cleared', session, reason || 'unspecified');
         if (target && typeof target.playbackFinished === 'function') target.playbackFinished(session, restore);
     }
 
     function handlePlayerExternal(data) {
         var session = pendingPlayback;
+        playbackDiagnosticRecord('player-external', session, session ? 'observed' : 'no-pending', !!data,
+            session && session.data ? session.data === data : null);
         if (!session || session.data !== data || session.phase === 'finished') return;
         session.phase = 'external';
         if (session.restoreOwner && typeof session.restoreOwner.playbackChanged === 'function') {
@@ -1406,7 +1587,8 @@
     // Callback identity belongs to one playback, never a mutable component or controller.
     function playbackReturnCallback(session) {
         return function () {
-            completePlaybackSession(session, true);
+            playbackDiagnosticRecord('callback-enter', session, 'dlna-return-callback');
+            completePlaybackSession(session, true, 'callback');
         };
     }
 
@@ -1571,6 +1753,7 @@
                 return;
             }
             if (pendingPlayback) {
+                playbackDiagnosticRecord('launch-blocked', pendingPlayback, 'previous-launch-pending');
                 notify('DLNA: previous player launch has not completed', 'error');
                 return;
             }
@@ -1582,10 +1765,16 @@
                 return;
             }
             save();
-            var session = { phase: 'launching', data: null, restoreOwner: self };
+            var session = {
+                diagnosticId: 'p' + (++playbackDiagnosticAttemptSequence),
+                phase: 'launching',
+                data: null,
+                restoreOwner: self
+            };
             session.returned = playbackReturnCallback(session);
             playback = session;
             pendingPlayback = session;
+            playbackDiagnosticRecord('pending-set', session, 'launch-approved');
             play(entry, resource, session);
             drawStatus();
         }
@@ -1597,11 +1786,13 @@
 
         this.playbackChanged = function (session) {
             if (playback !== session || destroyed) return;
+            playbackDiagnosticRecord('browser-playback-changed', session, 'session-update');
             drawStatus();
         };
 
         this.playbackFinished = function (session, restore) {
             if (playback !== session) return;
+            playbackDiagnosticRecord('browser-playback-finished', session, restore ? 'restore-requested' : 'no-restore');
             playback = null;
             drawStatus();
             if (!restore || !running || !current()) return;
@@ -1613,7 +1804,7 @@
         };
 
         this.playerClosed = function (event) {
-            if (playback && event && event.data === playback.data && playback.data) completePlaybackSession(playback, true);
+            if (playback && event && event.data === playback.data && playback.data) completePlaybackSession(playback, true, 'owner-close-data-identity');
         };
 
         this.create = function () {
@@ -1646,9 +1837,11 @@
             if (activeBrowser && activeBrowser !== self) activeBrowser.pause();
             activeBrowser = self;
             running = true;
+            playbackDiagnosticRecord('browser-start', playback || pendingPlayback, 'component-start');
             if (pendingPlayback) {
                 playback = pendingPlayback;
                 pendingPlayback.restoreOwner = self;
+                playbackDiagnosticRecord('restore-owner-attached', pendingPlayback, 'component-start');
             }
             self.create();
             Lampa.Controller.add('content', {
@@ -1702,14 +1895,19 @@
         };
 
         this.pause = function () {
+            playbackDiagnosticRecord('browser-pause', playback || pendingPlayback, 'component-pause');
             save(); cancelLoad(); running = false;
-            if (playback && playback.restoreOwner === self) playback.restoreOwner = null;
+            if (playback && playback.restoreOwner === self) {
+                playback.restoreOwner = null;
+                playbackDiagnosticRecord('restore-owner-detached', playback, 'component-pause');
+            }
         };
         this.stop = this.pause;
         this.isCurrent = current;
         this.render = function (asDom) { self.create(); return asDom ? root : window.$(root); };
         this.destroy = function () {
             if (destroyed) return;
+            playbackDiagnosticRecord('browser-destroy', playback || pendingPlayback, 'component-destroy');
             self.pause();
             destroyed = true;
             generation++;
@@ -1718,6 +1916,7 @@
                 activeBrowser = null;
                 if (playerReturnController === 'content') playerReturnController = null;
             }
+            playbackDiagnosticRecord('browser-destroyed', playback || pendingPlayback, 'component-destroyed');
             if (viewport) viewport.removeEventListener('scroll', save);
             if (root) {
                 window.$(root).find('.selector').off();
@@ -1754,10 +1953,21 @@
         var handler = guardState.playerCloseHandler;
         if (typeof handler !== 'function') {
             handler = function (event) {
+                var closeData;
+                var closeDataRead = false;
+                try {
+                    closeData = event && event.data;
+                    closeDataRead = true;
+                } catch (closeDataError) {}
+                var closingSession = pendingPlayback;
+                var hasCloseData = closeDataRead && !!closeData;
+                var closeMatches = closingSession && closingSession.data ? closeData === closingSession.data : 'not-checked-no-pending';
+                playbackDiagnosticRecord('player-close', closingSession, closingSession ? 'observed' : 'no-pending',
+                    hasCloseData, closeMatches);
                 if (pendingPlayback) {
-                    if (event && event.data === pendingPlayback.data && pendingPlayback.data) {
-                        completePlaybackSession(pendingPlayback, true);
-                    }
+                    if (closeDataRead && event && closeData === pendingPlayback.data && pendingPlayback.data) completePlaybackSession(pendingPlayback, true, 'close-data-identity');
+                    else playbackDiagnosticRecord('completion-rejected', pendingPlayback,
+                        hasCloseData ? 'close-data-mismatch' : 'close-data-missing', hasCloseData, closeMatches);
                     return;
                 }
                 if (activeBrowser) { activeBrowser.playerClosed(event); return; }
@@ -1826,6 +2036,7 @@
         try {
             registerPlayerCloseListener();
             registerPlayerExternalListener();
+            registerPlaybackDiagnosticListeners();
             bindSettingsLifecycle();
             addTranslations();
 
@@ -1856,6 +2067,25 @@
                 param: { name: PREFIX + 'androidjs_diag', type: 'trigger', default: false },
                 field: { name: translated('dlna_bridge_androidjs', 'Проверить AndroidJS') },
                 onChange: function () { diagnoseAndroidBridges(); }
+            });
+
+            registerParam('showPlaybackDiagnosticLogParam', {
+                component: COMPONENT,
+                param: { name: PREFIX + 'playback_diagnostic_log', type: 'trigger', default: false },
+                field: { name: 'PLAYBACK DIAGNOSTICS (LOCAL): Show playback diagnostic log (memory only)' },
+                onChange: function () { showPlaybackDiagnosticLog(); }
+            });
+            registerParam('previousPlaybackDiagnosticLogParam', {
+                component: COMPONENT,
+                param: { name: PREFIX + 'playback_diagnostic_previous', type: 'trigger', default: false },
+                field: { name: 'Previous playback diagnostic events (same snapshot)' },
+                onChange: function () { showPreviousPlaybackDiagnosticLog(); }
+            });
+            registerParam('clearPlaybackDiagnosticLogParam', {
+                component: COMPONENT,
+                param: { name: PREFIX + 'clear_playback_diagnostic_log', type: 'trigger', default: false },
+                field: { name: 'Clear playback diagnostic log (not catalog cache)' },
+                onChange: function () { clearPlaybackDiagnosticLog(); }
             });
 
             var required = ['component', 'serverUrlParam', 'openCatalogParam', 'clearCacheParam'];

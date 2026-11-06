@@ -169,6 +169,7 @@ function componentHarness(options) {
     var timers = [];
     var played = [];
     var notices = [];
+    var notyCalls = [];
     var pushed = [];
     var backwards = 0;
     var playerCallback;
@@ -215,13 +216,15 @@ function componentHarness(options) {
     }
     var settingsListener = createListener();
     var playerListener = createListener();
+    var selectListener = createListener();
+    var keypadListener = createListener();
     var Lampa = {
         SettingsApi: { addComponent: function () {}, addParam: function (param) { params.push(param); } },
         Storage: { field: function () { return ''; } },
         Lang: { add: function () {}, translate: function (value) { return value; } },
         Listener: { follow: function () {} },
         Settings: { listener: settingsListener },
-        Noty: { show: function (message) { notices.push(message); } },
+        Noty: { show: function (message, params) { notices.push(message); notyCalls.push({ message: message, params: params || {} }); } },
         Component: { add: function (name, constructor) { registry[name] = constructor; } },
         Activity: {
             active: function () { return active; },
@@ -250,7 +253,8 @@ function componentHarness(options) {
             collectionSet: function () {},
             collectionFocus: function (row) { document.activeElement = row; dispatch(row, 'hover:focus'); }
         },
-        Select: { show: function () { throw new Error('Component navigation must never use Select'); } },
+        Select: { listener: selectListener, show: function () { throw new Error('Diagnostic log must not open Select'); } },
+        Keypad: { listener: keypadListener },
         Player: {
             listener: playerListener,
             callback: function (fn) { playerCallback = fn; if (fn) playerCallbacks.push(fn); },
@@ -258,7 +262,7 @@ function componentHarness(options) {
             play: function (data) { if (options.playerThrows) throw Error('Player failure'); played.push(data);
                 var run = true; playerListener.send('create', { data: data, abort: function () { run = false; } });
                 if (!run) return;
-                function begin() { launches.push(data); if (options.externalPlayer) playerListener.send('external', data); else { playerOpened = true; controller = 'player'; } }
+                function begin() { launches.push(data); if (options.externalPlayer) playerListener.send('external', data); else { playerListener.send('start', data); playerOpened = true; controller = 'player'; } }
                 if (options.deferredPlayer) pendingPlayers.push(begin); else begin(); }
         },
         Reguest: function () {
@@ -313,6 +317,24 @@ function componentHarness(options) {
         settingsClosed: function () { return settingsClosed; },
         externalHandlers: function () { return playerListener.count('external'); },
         closeHandlers: function () { return playerListener.count('close'); },
+        createHandlers: function () { return playerListener.count('create'); },
+        startHandlers: function () { return playerListener.count('start'); },
+        showPlaybackDiagnosticLog: function () {
+            var param = params.filter(function (item) { return item.param.name === 'dlna_bridge_playback_diagnostic_log'; })[0];
+            assert.ok(param); param.onChange();
+        },
+        showPreviousPlaybackDiagnosticLog: function () {
+            var param = params.filter(function (item) { return item.param.name === 'dlna_bridge_playback_diagnostic_previous'; })[0];
+            assert.ok(param); param.onChange();
+        },
+        lastNotice: function () { return notyCalls[notyCalls.length - 1]; },
+        notyCalls: notyCalls,
+        selectObserverCount: function () { return selectListener.count('preshow') + selectListener.count('close'); },
+        keypadBackHandlers: function () { return keypadListener.count('back'); },
+        clearPlaybackDiagnosticLog: function () {
+            var param = params.filter(function (item) { return item.param.name === 'dlna_bridge_clear_playback_diagnostic_log'; })[0];
+            assert.ok(param); param.onChange();
+        },
         visibilityHandlers: function () { return (document.events.visibilitychange || []).length; },
         windowHandlers: function () { return Object.keys(windowEvents).reduce(function (n, key) { return n + windowEvents[key].length; }, 0); },
         paused: function () { screen().pause(); },
@@ -894,4 +916,269 @@ test('late close during Browse preserves current folder and allows next playback
     assert.strictEqual(h.controller(), 'content'); assert.strictEqual(h.launches.length, 2);
     assert.strictEqual(h.document.activeElement, h.rows()[1]); assert.strictEqual(h.viewport().scrollTop, 31);
     assert.strictEqual(h.pendingPlayers.length, 0); assert.strictEqual(h.requests.length, 0);
+});
+
+function diagnosticNumbers(message) {
+    return message.split('<br>').map(function (line) {
+        var match = /^(?:#)(\d+)\s/.exec(line);
+        return match ? Number(match[1]) : null;
+    }).filter(function (number) { return number !== null; });
+}
+
+function readPlaybackDiagnosticPages(h) {
+    var pages = [];
+    h.showPlaybackDiagnosticLog();
+    var message = h.lastNotice().message;
+    pages.push(message);
+    for (var i = 0; i < 30 && !/No older playback diagnostic events remain|Playback diagnostic log is empty/.test(message); i++) {
+        h.showPreviousPlaybackDiagnosticLog();
+        message = h.lastNotice().message;
+        pages.push(message);
+    }
+    return pages.join('\n');
+}
+
+test('blocked launch is logged against the pending attempt without media details', function () {
+    var h = componentHarness({ externalPlayer: true });
+    h.open(); h.reply([video('http://media/private?token=SECRET')]); h.press('enter');
+    h.press('enter');
+    var lines = readPlaybackDiagnosticPages(h);
+
+    assert.match(lines, /launch-blocked \[p1\]/);
+    assert.match(lines, /phase=external/);
+    assert.match(lines, /ctrl=content/);
+    assert.match(lines, /activity=dlna_bridge_browser/);
+    assert.doesNotMatch(lines, /private|SECRET/);
+    assert.strictEqual(h.played.length, 1);
+    assert.strictEqual(h.launches.length, 1);
+});
+
+test('notification pages use a fixed safe snapshot and leave Select, Keypad, cache and playback untouched', function () {
+    var h = componentHarness({ externalPlayer: true });
+    var item = video('http://media/private?token=SECRET');
+    item.title = 'PRIVATE_TITLE';
+    h.open(); h.reply([item]); h.press('enter');
+    for (var i = 0; i < 13; i++) h.Lampa.Player.listener.send('start', {});
+
+    var cache = h.api.cache;
+    var played = h.played.length;
+    var controller = h.controller();
+    h.showPlaybackDiagnosticLog();
+    var first = h.lastNotice();
+    var firstNumbers = diagnosticNumbers(first.message);
+    assert.strictEqual(first.params.time, 30000);
+    assert.strictEqual(firstNumbers.length, 6);
+    assert.match(first.message, /oldest first/);
+    assert.match(first.message, /Previous events/);
+    assert.doesNotMatch(first.message, /SECRET|PRIVATE_TITLE|media\//);
+
+    for (var j = 0; j < 3; j++) h.Lampa.Player.listener.send('start', {});
+    var pages = [first.message];
+    var message = first.message;
+    for (var k = 0; k < 30 && !/No older playback diagnostic events remain/.test(message); k++) {
+        h.showPreviousPlaybackDiagnosticLog();
+        message = h.lastNotice().message;
+        pages.push(message);
+    }
+    assert.match(message, /No older playback diagnostic events remain/);
+
+    var allNumbers = [];
+    pages.forEach(function (page) {
+        var numbers = diagnosticNumbers(page);
+        assert.ok(numbers.length <= 6);
+        allNumbers = allNumbers.concat(numbers);
+    });
+    pages.forEach(function (page) {
+        var pageNumbers = diagnosticNumbers(page);
+        var sortedPage = pageNumbers.slice(0).sort(function (a, b) { return a - b; });
+        assert.deepStrictEqual(pageNumbers, sortedPage);
+    });
+    for (var pageIndex = 1; pageIndex < pages.length; pageIndex++) {
+        var older = diagnosticNumbers(pages[pageIndex]);
+        var newer = diagnosticNumbers(pages[pageIndex - 1]);
+        if (older.length && newer.length) assert.ok(older[older.length - 1] < newer[0]);
+    }
+    assert.strictEqual(new Set(allNumbers).size, allNumbers.length);
+    assert.strictEqual(Math.max.apply(Math, allNumbers), Math.max.apply(Math, firstNumbers));
+    assert.strictEqual(h.selectObserverCount(), 0);
+    assert.strictEqual(h.keypadBackHandlers(), 0);
+    assert.strictEqual(h.controller(), controller);
+    assert.strictEqual(h.api.cache, cache);
+    assert.strictEqual(h.played.length, played);
+    assert.strictEqual(h.requests.length, 0);
+
+    var noticeCount = h.notices.length;
+    h.press('enter');
+    assert.strictEqual(h.played.length, played);
+    assert.strictEqual(h.notices.length, noticeCount + 1);
+    assert.strictEqual(h.controller(), controller);
+    assert.strictEqual(h.api.cache, cache);
+});
+
+test('empty journal, previous-before-show, end of snapshot, and clear are explicit', function () {
+    var h = componentHarness();
+    var cache = h.api.cache;
+    h.showPreviousPlaybackDiagnosticLog();
+    assert.match(h.lastNotice().message, /Show the playback diagnostic log first/);
+    h.showPlaybackDiagnosticLog();
+    assert.match(h.lastNotice().message, /Playback diagnostic log is empty/);
+    h.showPreviousPlaybackDiagnosticLog();
+    assert.match(h.lastNotice().message, /Playback diagnostic log is empty/);
+    h.clearPlaybackDiagnosticLog();
+    assert.match(h.lastNotice().message, /Playback diagnostic log cleared/);
+    h.showPreviousPlaybackDiagnosticLog();
+    assert.match(h.lastNotice().message, /Show the playback diagnostic log first/);
+    assert.strictEqual(h.api.cache, cache);
+    assert.strictEqual(h.played.length, 0);
+    assert.strictEqual(h.requests.length, 0);
+    assert.strictEqual(h.selectObserverCount(), 0);
+    assert.strictEqual(h.keypadBackHandlers(), 0);
+});
+
+test('playback diagnostic notifications preserve callback and close order without media data', function () {
+    var h = componentHarness();
+    var item = video('http://192.168.1.1:8200/video.mp4?token=SECRET_VALUE');
+    item.title = 'PRIVATE_VIDEO_TITLE';
+    h.open(); h.reply([item]); h.press('enter'); h.closePlayer();
+    var lines = readPlaybackDiagnosticPages(h).replace(/<br>/g, '\n');
+
+    assert.match(lines, /pending-set/);
+    assert.match(lines, /callback-register/);
+    assert.match(lines, /player-play-before/);
+    assert.match(lines, /player-create/);
+    assert.match(lines, /player-start/);
+    assert.match(lines, /callback-enter/);
+    assert.match(lines, /completion-accepted/);
+    assert.match(lines, /player-close/);
+    function sequenceFor(eventName) {
+        var row = lines.split('\n').filter(function (line) { return line.indexOf(' ' + eventName + ' [') >= 0; })[0];
+        assert.ok(row, eventName);
+        return Number(/^#(\d+)/.exec(row)[1]);
+    }
+    assert.ok(sequenceFor('pending-set') < sequenceFor('player-create'));
+    assert.ok(sequenceFor('player-create') < sequenceFor('player-start'));
+    assert.ok(sequenceFor('player-start') < sequenceFor('callback-enter'));
+    assert.ok(sequenceFor('callback-enter') < sequenceFor('completion-accepted'));
+    assert.ok(sequenceFor('completion-accepted') < sequenceFor('pending-cleared'));
+    assert.ok(sequenceFor('pending-cleared') < sequenceFor('player-close'));
+    assert.doesNotMatch(lines, /SECRET_VALUE|PRIVATE_VIDEO_TITLE|192\.168\.1\.1/);
+});
+
+test('playback diagnostics accept a matching close when callback API is absent', function () {
+    var h = componentHarness();
+    h.Lampa.Player.callback = undefined;
+    h.open(); h.reply([video()]); h.press('enter'); h.closeEvent(h.played[0]);
+    h.screen().select(0);
+    var lines = readPlaybackDiagnosticPages(h);
+
+    assert.strictEqual(h.played.length, 2);
+    assert.match(lines, /api-unavailable/);
+    assert.match(lines, /sameData=yes/);
+    assert.match(lines, /close-data-identity/);
+});
+
+test('playback diagnostics do not claim callback replacement from an unobserved setter', function () {
+    var h = componentHarness();
+    h.open(); h.reply([video()]); h.press('enter');
+    h.Lampa.Player.callback(function () {});
+    h.closeEvent(h.played[0]);
+    h.screen().select(0);
+    var lines = readPlaybackDiagnosticPages(h);
+
+    assert.strictEqual(h.played.length, 2);
+    assert.match(lines, /callback-register/);
+    assert.match(lines, /close-data-identity/);
+    assert.doesNotMatch(lines, /callback-overwritten/);
+});
+
+test('playback diagnostics preserve lock and explain close without data or with copied data', function () {
+    ['missing', 'copy'].forEach(function (variant) {
+        var h = componentHarness();
+        h.Lampa.Player.callback = undefined;
+        h.open(); h.reply([video()]); h.press('enter');
+        if (variant === 'missing') h.closeEvent();
+        else h.closeEvent({ url: h.played[0].url, title: h.played[0].title, quality: h.played[0].quality });
+        var calls = h.played.length;
+        var noticeCount = h.notices.length;
+        h.screen().select(0);
+        var lines = readPlaybackDiagnosticPages(h);
+
+        assert.strictEqual(h.played.length, calls);
+        assert.ok(h.notices.length > noticeCount);
+        assert.match(lines, /completion-rejected/);
+        assert.match(lines, variant === 'missing' ? /close-data-missing/ : /close-data-mismatch/);
+        assert.match(lines, variant === 'missing' ? /data=no/ : /sameData=no/);
+        assert.doesNotMatch(lines, /video\.mp4/);
+    });
+});
+
+test('diagnostic log pagination keeps the cap at 100 and adds no Select or Keypad subscriptions', function () {
+    var h = componentHarness();
+    assert.strictEqual(h.createHandlers(), 1);
+    assert.strictEqual(h.startHandlers(), 1);
+    h.api.init();
+    assert.strictEqual(h.createHandlers(), 1);
+    assert.strictEqual(h.startHandlers(), 1);
+    for (var i = 0; i < 130; i++) h.Lampa.Player.listener.send('start', {});
+
+    h.showPlaybackDiagnosticLog();
+    var pages = [h.lastNotice().message];
+    var current = pages[0];
+    for (var j = 0; j < 30 && !/No older playback diagnostic events remain/.test(current); j++) {
+        h.showPreviousPlaybackDiagnosticLog();
+        current = h.lastNotice().message;
+        pages.push(current);
+    }
+    var allNumbers = [];
+    pages.forEach(function (page) { allNumbers = allNumbers.concat(diagnosticNumbers(page)); });
+    allNumbers = allNumbers.filter(function (number) { return number !== null; });
+    assert.strictEqual(allNumbers.length, 100);
+    assert.strictEqual(Math.min.apply(Math, allNumbers), 31);
+    assert.strictEqual(Math.max.apply(Math, allNumbers), 130);
+    assert.match(current, /No older playback diagnostic events remain/);
+    assert.strictEqual(h.selectObserverCount(), 0);
+    assert.strictEqual(h.keypadBackHandlers(), 0);
+});
+
+test('viewing and clearing playback diagnostics do not change external lock or catalog cache', function () {
+    var h = componentHarness({ externalPlayer: true });
+    h.open(); h.reply([video()]); h.press('enter');
+    var cache = h.api.cache;
+    var calls = h.played.length;
+    var controller = h.controller();
+    h.showPlaybackDiagnosticLog();
+    assert.match(h.lastNotice().message, /player-external/);
+    assert.strictEqual(h.api.cache, cache);
+    h.clearPlaybackDiagnosticLog();
+    assert.strictEqual(h.api.cache, cache);
+    h.showPlaybackDiagnosticLog();
+    assert.match(h.lastNotice().message, /Playback diagnostic log is empty/);
+    h.press('enter');
+    assert.strictEqual(h.played.length, calls);
+    assert.strictEqual(h.controller(), controller);
+    assert.strictEqual(h.requests.length, 0);
+    assert.strictEqual(h.closeHandlers(), 1);
+    assert.strictEqual(h.externalHandlers(), 1);
+});
+
+test('playback diagnostic log records owner pause, destruction, reopen and handoff', function () {
+    var h = componentHarness({ externalPlayer: true });
+    h.open(); h.reply([video()]); h.press('enter');
+    h.press('back');
+    h.open();
+    assert.strictEqual(h.requests.length, 0);
+    var lines = readPlaybackDiagnosticPages(h);
+
+    assert.match(lines, /browser-pause/);
+    assert.match(lines, /restore-owner-detached/);
+    assert.match(lines, /browser-destroy/);
+    assert.match(lines, /browser-start/);
+    assert.match(lines, /restore-owner-attached/);
+    assert.match(lines, /activity=dlna_bridge_browser/);
+    assert.match(lines, /ctrl=/);
+    assert.strictEqual(h.played.length, 1);
+    assert.strictEqual(h.title(), 'DLNA');
+    assert.strictEqual(h.requests.length, 0);
+    assert.strictEqual(h.selectObserverCount(), 0);
+    assert.strictEqual(h.keypadBackHandlers(), 0);
 });
