@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.6.5 — Android return permission (2026-11-07)
+
+- Published for limited Xiaomi testing, with manual device verification pending.
+- Allow a subsequent separate selection after matching external, a full hidden/visible cycle, document focus and ownership of the original folder in the same catalog instance.
+- Invalidate the cycle on folder/Activity changes and UI coverage. Keep manual recovery available.
+- Require fresh input, rejecting residual keyup, held OK and stale clicks. Allow resource selection after permission through OK and pointer.
+- Record auto-return-unconfirmed abandonment. Preserve the late native p2 → p1 launch risk and accepted Home-return behavior.
+- Validate 435 tests against the release copy, Node syntax, Acorn 8.18.0 ES5 and version-normalized source equality.
+
+## 0.6.4 — Return diagnostics
+
+- Add bounded observation of visibility, document focus, controller ownership and catalog/folder generations around Android playback.
+- Keep playback lock and manual recovery rules during observation.
+
+## 0.6.3 — Catalog Back and Android recovery
+
+- Return from catalog root to DLNA Bridge settings after leaving the catalog Activity. Preserve nested-folder and resource Back navigation.
+- Restore usability when backward produces no transition, subject to catalog ownership.
+- Preserve explicit recovery confirmation and a separate subsequent video selection.
+- Limited Xiaomi observations confirmed root/nested Back, repeated catalog/settings cycles and recovery behavior. See docs/architecture.md for evidence boundaries.
+
+## 0.6.0–0.6.2 — Component UI and lifecycle development
+
+- Introduce a catalog Activity and playback ownership independent of component lifetime.
+- Add Android pending-launch protection, recovery, lifecycle diagnostics and regression coverage.
+- Share the lampa_dlna_bridge_060 GUARD across the 0.6.x copies.
+
 ## 0.5.9 — Multiple DLNA resources
 
 - Preserve every distinct valid HTTP(S) `res` resource and its available protocol, MIME, size, duration, resolution, and bitrate metadata.
