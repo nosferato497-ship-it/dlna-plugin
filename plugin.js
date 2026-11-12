@@ -20,8 +20,179 @@
     var COMPONENT = 'dlna_bridge';
     var BROWSER_COMPONENT = 'dlna_bridge_browser';
     var activeBrowser = null;
-    // A Player.play call remains owned by the plugin until an explicit player completion signal.
+    // A Player.play call remains owned until completion or an explicit external recovery decision.
     var pendingPlayback = null;
+    var androidRecoveryConfirmation = null;
+    var abandonedPlaybackExists = false;
+    var androidReturnState = null;
+    var androidReturnInput = null;
+    var androidEnterDown = false;
+
+    function androidReturnLog(event, session, reason) {
+        try { playbackDiagnosticRecord(event, session, reason); } catch (error) {}
+    }
+
+    function androidReturnContext() {
+        try { return activeBrowser && activeBrowser.playbackContext(); } catch (error) { return null; }
+    }
+
+    function androidReturnCovered() {
+        try {
+            if (Lampa.Controller.enabled().name !== 'content' ||
+                /(?:^|\s)(settings|menu|search)--open(?:\s|$)/.test(document.body.className) ||
+                Lampa.Controller.windowTop() || !document.querySelector) return true;
+            return !!document.querySelector('.modal,.selectbox--open,.youtube-player,.player,.search-box,.search,.console');
+        } catch (error) { return true; }
+    }
+
+    function androidReturnForeground() {
+        try { return document.hidden === false && document.visibilityState !== 'hidden' && document.hasFocus() === true; }
+        catch (error) { return false; }
+    }
+
+    function androidReturnReady(context) {
+        return androidInputReady(context) && !context.resources;
+    }
+
+    function androidInputReady(context) {
+        return !!context && context.current && context.content && context.ready && context.navigationFocus &&
+            !context.loading && !context.error && !androidReturnCovered();
+    }
+
+    function resetAndroidReturnCycle() {
+        if (androidReturnState) {
+            if (androidReturnState.queued) clearTimeout(androidReturnState.timer);
+            androidReturnState.queued = false;
+            androidReturnState.away = false; androidReturnState.returned = false;
+        }
+    }
+
+    function beginAndroidReturn(session) {
+        resetAndroidReturnCycle();
+        androidReturnState = null;
+        androidReturnInput = null;
+        var context = androidReturnContext();
+        try {
+            if (!Lampa.Platform || typeof Lampa.Platform.is !== 'function' || !Lampa.Platform.is('android')) return;
+        } catch (error) { return; }
+        if (!androidReturnReady(context) || !androidReturnForeground()) return;
+        if (guardState.settingsLifecycleState !== 'registered') return;
+        var required = ['Visibility', 'Focus', 'Blur', 'Controller', 'Activity', 'Modal', 'Select', 'Internal', 'Down', 'Up'];
+        for (var i = 0; i < required.length; i++) if (registrationState('androidReturn' + required[i]) !== 'registered') return;
+        androidReturnState = { id: session.diagnosticId, catalog: context.catalog, folder: context.folder,
+            external: false, away: false, returned: false, queued: false, timer: 0 };
+    }
+
+    function observeAndroidReturn(type) {
+        if (androidReturnInput && (!androidReturnForeground() || !androidInputReady(androidReturnContext()))) resetAndroidReturnGesture();
+        var state = androidReturnState;
+        var session = pendingPlayback;
+        if (!state || !session || session.diagnosticId !== state.id || session.internalStarted) return;
+        var context = androidReturnContext();
+        if (!androidReturnReady(context) || context.catalog !== state.catalog || context.folder !== state.folder) {
+            resetAndroidReturnCycle(); return;
+        }
+        if (type === 'visibility') {
+            if (document.hidden === true) {
+                if (!state.away) resetAndroidReturnCycle();
+                state.away = true; state.returned = false; return;
+            }
+            if (document.hidden === false && state.away) {
+                state.away = false;
+                state.returned = state.external && session.phase === 'external';
+                if (!state.returned) androidReturnLog('return-cycle-rejected', session, 'visible-before-external');
+            }
+        }
+        if (!state.returned || !state.external || session.phase !== 'external' || !androidReturnForeground()) return;
+        if (type !== 'commit') {
+            if (!state.queued) {
+                state.queued = true;
+                // End-of-dispatch validation, never elapsed-time evidence of return/completion.
+                state.timer = setTimeout(function () {
+                    if (androidReturnState !== state) return;
+                    state.queued = false;
+                    observeAndroidReturn('commit');
+                }, 0);
+            }
+            return;
+        }
+        // Consume before diagnostics or owner callbacks can reenter. This is permission, not completion.
+        androidReturnState = null;
+        androidReturnInput = { ready: !androidEnterDown, down: false, ticket: false, catalog: 0, folder: 0 };
+        if (abandonPlaybackSession(session, 'auto-return-unconfirmed')) {
+            androidReturnLog('recovery-auto-accepted', session, 'auto-return-unconfirmed');
+        }
+    }
+
+    function androidReturnKey(event, down) {
+        var code = event && event.code;
+        if (code !== 13 && code !== 29443 && code !== 117 && code !== 65385) return;
+        var held = androidEnterDown;
+        androidEnterDown = down;
+        var gate = androidReturnInput;
+        if (!gate) return;
+        gate.ticket = false;
+        if (down) {
+            var context = androidReturnContext();
+            gate.down = event.enabled !== false && gate.ready && !held && !(event.event && (event.event.repeat || event.event.defaultPrevented)) &&
+                androidReturnForeground() && androidInputReady(context);
+            if (gate.down) { gate.catalog = context.catalog; gate.folder = context.folder; }
+        } else {
+            gate.ticket = event.enabled !== false && gate.down && !(event.event && event.event.defaultPrevented);
+            gate.down = false;
+            gate.ready = true;
+        }
+    }
+
+    function resetAndroidReturnGesture() {
+        if (androidReturnInput) { androidReturnInput.down = false; androidReturnInput.ticket = false; }
+    }
+
+    function androidReturnPointer() {
+        var gate = androidReturnInput;
+        var context = androidReturnContext();
+        if (gate && androidReturnForeground() && androidInputReady(context)) {
+            gate.ticket = true; gate.catalog = context.catalog; gate.folder = context.folder;
+        }
+    }
+
+    function consumeAndroidReturnInput() {
+        var gate = androidReturnInput;
+        if (!gate) return true;
+        var context = androidReturnContext();
+        var allow = gate.ticket && androidReturnForeground() && androidInputReady(context) &&
+            context.catalog === gate.catalog && context.folder === gate.folder;
+        gate.ticket = false;
+        return !!allow;
+    }
+
+    function bindAndroidReturn() {
+        function bind(target, type, name, handler, dom) {
+            if (!target || typeof target[dom ? 'addEventListener' : 'follow'] !== 'function' ||
+                registrationState(name) !== 'pending') return;
+            var callback = guardState[name] || handler;
+            guardState[name] = callback;
+            setRegistrationState(name, 'uncertain');
+            try {
+                if (dom) target.addEventListener(type, callback, false); else target.follow(type, callback);
+                setRegistrationState(name, 'registered');
+            } catch (error) {} // Fail closed; uncertain subscriptions are never duplicated.
+        }
+        bind(typeof document === 'undefined' ? null : document, 'visibilitychange', 'androidReturnVisibility', function () { observeAndroidReturn('visibility'); }, true);
+        bind(window, 'focus', 'androidReturnFocus', function () { observeAndroidReturn('focus'); }, true);
+        bind(window, 'blur', 'androidReturnBlur', resetAndroidReturnGesture, true);
+        bind(Lampa.Controller && Lampa.Controller.listener, 'toggle', 'androidReturnController', function () { observeAndroidReturn('context'); });
+        bind(Lampa.Listener, 'activity', 'androidReturnActivity', function (event) {
+            if (event && event.type === 'init') resetAndroidReturnCycle(); else observeAndroidReturn('context');
+        });
+        bind(Lampa.Modal && Lampa.Modal.listener, 'preshow', 'androidReturnModal', resetAndroidReturnCycle);
+        bind(Lampa.Select && Lampa.Select.listener, 'preshow', 'androidReturnSelect', resetAndroidReturnCycle);
+        bind(Lampa.Player && Lampa.Player.listener, 'start', 'androidReturnInternal', function (data) {
+            if (pendingPlayback && data === pendingPlayback.data) { pendingPlayback.internalStarted = true; androidReturnState = null; }
+        });
+        bind(Lampa.Keypad && Lampa.Keypad.listener, 'keydown', 'androidReturnDown', function (event) { androidReturnKey(event, true); });
+        bind(Lampa.Keypad && Lampa.Keypad.listener, 'keyup', 'androidReturnUp', function (event) { androidReturnKey(event, false); });
+    }
     var PLAYBACK_DIAGNOSTIC_MARKER = 'DLNA PLAYBACK DIAGNOSTICS (LOCAL)';
     var PLAYBACK_DIAGNOSTIC_LIMIT = 100;
     var PLAYBACK_DIAGNOSTIC_PAGE_SIZE = 6;
@@ -151,7 +322,79 @@
         return value;
     }
 
-    function playbackDiagnosticRecord(eventName, session, reason, dataPresent, identityMatch) {
+    var returnDiagnosticCatalogSequence = 0;
+    var returnDiagnosticFolderSequence = 0;
+    var returnDiagnosticAttempt = null;
+
+    function returnDiagnosticFlag(value) { return value === true ? '1' : value === false ? '0' : '?'; }
+
+    function recordReturnDiagnostic(kind) {
+        try {
+            var session = pendingPlayback;
+            var origin = returnDiagnosticAttempt;
+            var context = activeBrowser && typeof activeBrowser.playbackContext === 'function' ?
+                activeBrowser.playbackContext() : null;
+            var visibility = document.visibilityState;
+            if (visibility !== 'hidden' && visibility !== 'visible') {
+                visibility = typeof document.hidden === 'boolean' ? (document.hidden ? 'hidden' : 'visible') : '?';
+            }
+            var focused;
+            try { if (typeof document.hasFocus === 'function') focused = document.hasFocus(); } catch (focusReadError) {}
+            var other;
+            try {
+                var enabled = Lampa.Controller.enabled();
+                var settingsOpen = /(?:^|\s)(settings|menu|search)--open(?:\s|$)/.test(document.body.className);
+                if (enabled.name !== 'content' || settingsOpen) other = true;
+                else if (typeof document.querySelector === 'function') {
+                    other = !!document.querySelector('.modal,.selectbox--open,.youtube-player,.player,.search-box,.search,.console');
+                }
+            } catch (interfaceReadError) {}
+            var sameAttempt = session && origin && session.diagnosticId === origin.id;
+            var sameCatalog = !!(sameAttempt && context && context.current && context.catalog === origin.catalog);
+            var sample = {
+                external: sameAttempt ? returnDiagnosticFlag(origin.external) : '?',
+                visibility: visibility, documentFocus: returnDiagnosticFlag(focused),
+                catalog: context ? context.catalog : 0, folder: context ? context.folder : 0,
+                originCatalog: sameCatalog ? '1' : '0',
+                originFolder: sameCatalog && context.folder === origin.folder ? '1' : '0',
+                content: returnDiagnosticFlag(context ? context.content : false), other: returnDiagnosticFlag(other),
+                loading: returnDiagnosticFlag(context ? context.loading : undefined),
+                error: returnDiagnosticFlag(context ? context.error : undefined),
+                resources: returnDiagnosticFlag(context ? context.resources : undefined),
+                navigationFocus: returnDiagnosticFlag(context ? context.navigationFocus : undefined),
+                hooks: ['blur', 'focus', 'visibility', 'controller', 'activity'].map(function (name) {
+                    var state = registrationState('returnDiagnostic_' + name);
+                    return state === 'registered' ? '1' : state === 'pending' ? '0' : '?';
+                }).join('')
+            };
+            playbackDiagnosticRecord('return-' + kind, session, 'pending-context-not-causation', undefined, undefined, sample);
+        } catch (returnDiagnosticError) {}
+    }
+
+    function registerReturnDiagnostics() {
+        function register(target, type, name, dom) {
+            if (!target || typeof target[dom ? 'addEventListener' : 'follow'] !== 'function') return;
+            if (registrationState(name) !== 'pending') return;
+            var handler = guardState[name];
+            if (typeof handler !== 'function') {
+                handler = function () { recordReturnDiagnostic(name.substring(17)); };
+                guardState[name] = handler;
+            }
+            setRegistrationState(name, 'uncertain');
+            try {
+                if (dom) target.addEventListener(type, handler, false);
+                else target.follow(type, handler);
+                setRegistrationState(name, 'registered');
+            } catch (returnRegistrationError) {} // Never repeat an uncertain registration.
+        }
+        register(window, 'blur', 'returnDiagnostic_blur', true);
+        register(window, 'focus', 'returnDiagnostic_focus', true);
+        register(document, 'visibilitychange', 'returnDiagnostic_visibility', true);
+        register(Lampa.Controller && Lampa.Controller.listener, 'toggle', 'returnDiagnostic_controller', false);
+        register(Lampa.Listener, 'activity', 'returnDiagnostic_activity', false);
+    }
+
+    function playbackDiagnosticRecord(eventName, session, reason, dataPresent, identityMatch, observation) {
         try {
             var now = (new Date()).getTime();
             var controller = 'unknown';
@@ -180,8 +423,22 @@
                 record.phase = playbackDiagnosticLabel(session.phase || 'unknown');
                 record.owner = session.restoreOwner ? (session.restoreOwner === activeBrowser ? 'active' : 'other') : 'none';
             }
+            if (observation) record.observation = observation;
             while (playbackDiagnosticRecords.length >= PLAYBACK_DIAGNOSTIC_LIMIT) playbackDiagnosticRecords.shift();
             playbackDiagnosticRecords.push(record);
+            if (eventName === 'pending-set') {
+                var context = activeBrowser && activeBrowser.playbackContext();
+                returnDiagnosticAttempt = {
+                    id: session.diagnosticId, catalog: context ? context.catalog : 0,
+                    folder: context ? context.folder : 0, external: false
+                };
+                recordReturnDiagnostic('request');
+            } else if (eventName === 'player-external') {
+                if (identityMatch === true && session && returnDiagnosticAttempt &&
+                    returnDiagnosticAttempt.id === session.diagnosticId) returnDiagnosticAttempt.external = true;
+                recordReturnDiagnostic(identityMatch === true ? 'external-match' : 'external-other');
+            } else if (eventName === 'player-start') recordReturnDiagnostic('player-start');
+            else if (eventName === 'pending-cleared' || eventName === 'playback-abandoned') returnDiagnosticAttempt = null;
         } catch (diagnosticError) {}
     }
 
@@ -194,6 +451,15 @@
         }
         if (record.phase) parts.push('phase=' + record.phase);
         if (record.owner) parts.push('owner=' + record.owner);
+        if (record.observation) {
+            var sample = record.observation;
+            parts.push('E=' + sample.external, 'vis=' + sample.visibility, 'df=' + sample.documentFocus,
+                'cat=' + sample.catalog, 'dir=' + sample.folder,
+                'origin=' + sample.originCatalog + '/' + sample.originFolder,
+                'content=' + sample.content, 'other=' + sample.other,
+                'load=' + sample.loading, 'err=' + sample.error, 'res=' + sample.resources, 'nav=' + sample.navigationFocus,
+                'hooks=' + sample.hooks);
+        }
         parts.push('ctrl=' + record.controller, 'activity=' + record.activity);
         return '#' + record.n + ' +' + record.ms + 'ms ' + record.event + ' [' + record.id + '] | ' + parts.join(' | ');
     }
@@ -270,6 +536,10 @@
                         var session = pendingPlayback;
                         var sameData = session && session.data ? session.data === data : null;
                         playbackDiagnosticRecord('player-' + eventType, session, 'observed', !!data, sameData);
+                        if (eventType === 'start' && sameData && session) session.internalStarted = true;
+                        if ((eventType === 'start' || eventType === 'create') && abandonedPlaybackExists && !sameData) {
+                            playbackDiagnosticRecord('playback-event-rejected', session, 'unowned-' + eventType, !!data, sameData);
+                        }
                     } catch (diagnosticHandlerError) {}
                 };
             })(type);
@@ -303,6 +573,7 @@
     function registerPlaybackDiagnosticListeners() {
         try { registerPlaybackDiagnosticListener('create'); } catch (createRegistrationError) {}
         try { registerPlaybackDiagnosticListener('start'); } catch (startRegistrationError) {}
+        try { registerReturnDiagnostics(); } catch (returnRegistrationError) {}
     }
 
     function logRegistrationError(message, error) {
@@ -1431,6 +1702,8 @@
         var handler = guardState.settingsLifecycleHandler;
         if (typeof handler !== 'function') {
             handler = function (event) {
+                resetAndroidReturnCycle();
+                recordReturnDiagnostic(event && event.name ? 'settings-open' : 'settings-close');
                 // Settings emits open for its main screen and each component.
                 // Leaving this plugin's settings component invalidates an in-flight Browse.
                 // The Activity owns cancellation while the component exists.
@@ -1521,10 +1794,213 @@
         showFolder('0', 'DLNA — ' + baseUrl(), []);
     }
 
+    // Recovery authorizes another attempt; it cannot cancel a queued native Android request.
+    // Keep only one confirmation and a scalar tombstone, never an unbounded list of payloads/owners.
+    function recoveryRecord(eventName, state, reason) {
+        playbackDiagnosticRecord(eventName, state && state.summary, reason);
+    }
+
+    function invalidateAndroidRecovery(reason) {
+        var state = androidRecoveryConfirmation;
+        if (!state) return;
+        recoveryRecord('recovery-confirm-stale', state, reason);
+        state.cancelOnly = true;
+        state.session = null;
+        if (reason === 'activity-changed') { state.activity = null; state.exitActivity = null; }
+    }
+
+    function retireAndroidRecovery(state) {
+        if (androidRecoveryConfirmation === state) androidRecoveryConfirmation = null;
+        state.closed = true;
+        state.session = null;
+        state.activity = null;
+        state.node = null;
+        state.frame = null;
+        state.below = null;
+        state.exitActivity = null;
+    }
+
+    // Closing our window does not require permission to abandon a playback attempt.
+    function closeAndroidRecovery(state) {
+        if (state.closed || state.opening || state.foreignOpening || !state.node) return false;
+        try {
+            if (Lampa.Modal.render()[0] !== state.node || !state.node.parentNode ||
+                Lampa.Controller.windowTop() !== (state.frame || state.below)) return false;
+        } catch (error) { return false; }
+        var activity = state.exitActivity || state.activity;
+        var origin = state.exitActivity ? state.exitOrigin : state.origin;
+        retireAndroidRecovery(state); // Consume before close() sends synchronous events.
+        Lampa.Modal.close();
+        if (activity && Lampa.Activity.active() === activity && !Lampa.Modal.opened() &&
+            !Lampa.Controller.windowTop() && Lampa.Controller.enabled().name === 'modal') {
+            Lampa.Controller.toggle(origin);
+        }
+        return true;
+    }
+
+    function bindAndroidRecoveryContext() {
+        if (registrationState('androidRecoveryContext') === 'registered') return true;
+        if (registrationState('androidRecoveryContext') !== 'pending') return false;
+        var events = Lampa.Listener;
+        var modal = Lampa.Modal;
+        var controller = Lampa.Controller;
+        if (!events || typeof events.follow !== 'function' || !modal || !modal.listener ||
+            typeof modal.listener.follow !== 'function' || !controller.listener ||
+            typeof controller.listener.follow !== 'function') return false;
+        setRegistrationState('androidRecoveryContext', 'uncertain');
+        try {
+            events.follow('activity', function () { invalidateAndroidRecovery('activity-changed'); });
+            controller.listener.follow('toggle', function (event) {
+                var state = androidRecoveryConfirmation;
+                if (!state) return;
+                if (event.name !== 'modal') {
+                    invalidateAndroidRecovery('controller-changed');
+                    if (state.opening) { state.exitActivity = Lampa.Activity.active(); state.exitOrigin = event.name; }
+                }
+                else if (state.node && modal.render()[0] === state.node) state.frame = controller.windowTop();
+            });
+            modal.listener.follow('preshow', function (event) {
+                var state = androidRecoveryConfirmation;
+                if (state && event.active !== state.params) {
+                    state.foreignOpening = true;
+                    invalidateAndroidRecovery('modal-changed');
+                }
+            });
+            modal.listener.follow('fullshow', function (event) {
+                var state = androidRecoveryConfirmation;
+                if (!state) return;
+                if (event.active === state.params) state.node = event.html[0];
+                else state.foreignOpening = false;
+            });
+            modal.listener.follow('close', function (event) {
+                var state = androidRecoveryConfirmation;
+                if (!state) return;
+                if (event.active === state.params) retireAndroidRecovery(state);
+                else state.foreignOpening = false;
+            });
+            setRegistrationState('androidRecoveryContext', 'registered');
+            return true;
+        } catch (error) { return false; }
+    }
+
+    function ownsAndroidRecovery(state) {
+        try {
+            return !state.closed && !state.cancelOnly && androidRecoveryConfirmation === state && Lampa.Activity.active() === state.activity &&
+                Lampa.Controller.enabled().name === 'modal' && Lampa.Modal.opened() &&
+                Lampa.Modal.render()[0] === state.node && Lampa.Controller.windowTop() === state.frame;
+        } catch (error) { return false; }
+    }
+
+    function resolveAndroidRecovery(state, allow, reason) {
+        if (!allow) {
+            if (closeAndroidRecovery(state)) recoveryRecord('recovery-cancelled', state, reason || 'user-cancel');
+            else recoveryRecord('recovery-confirm-stale', state, 'confirmation-not-current');
+            return;
+        }
+        if (!ownsAndroidRecovery(state) || pendingPlayback !== state.session || !state.session ||
+            (allow && (state.cancelOnly || state.session.phase !== 'external' || state.session.internalStarted))) {
+            recoveryRecord('recovery-confirm-stale', state, 'confirmation-not-current');
+            return;
+        }
+        var session = state.session;
+        recoveryRecord(allow ? 'recovery-accepted' : 'recovery-cancelled', state, reason || (allow ? 'user-permission' : 'user-cancel'));
+        state.cancelOnly = true; // Consume permission before any reentrant event.
+        state.session = null;
+        if (allow) {
+            abandonPlaybackSession(session, 'user-permission-not-completion');
+        }
+        closeAndroidRecovery(state);
+    }
+
+    function abandonPlaybackSession(session, reason) {
+        if (!session || pendingPlayback !== session) return false;
+        pendingPlayback = null;
+        resetAndroidReturnCycle();
+        androidReturnState = null;
+        session.phase = 'abandoned';
+        var owner = session.restoreOwner;
+        session.restoreOwner = null;
+        abandonedPlaybackExists = true;
+        androidReturnLog('playback-abandoned', session, reason);
+        if (owner && typeof owner.playbackAbandoned === 'function') owner.playbackAbandoned(session);
+        if (activeBrowser && activeBrowser !== owner) activeBrowser.playbackAbandoned(session);
+        return true;
+    }
+
+    function requestAndroidRecovery() {
+        var session = pendingPlayback;
+        playbackDiagnosticRecord('recovery-request', session, 'settings-action');
+        var reason = !session ? 'no-pending' : session.internalStarted ? 'internal-player' :
+            session.phase !== 'external' ? 'external-not-observed' : '';
+        if (!reason && (!Lampa.Platform || typeof Lampa.Platform.is !== 'function' || !Lampa.Platform.is('android'))) reason = 'not-android';
+        if (reason) {
+            playbackDiagnosticRecord('recovery-refused', session, reason);
+            notify(!session ? 'Незавершённого запуска нет' : reason === 'internal-player' ?
+                'Текущая попытка относится к встроенному плееру. Android-восстановление неприменимо.' :
+                reason === 'not-android' ? 'Восстановление доступно только в Android-оболочке.' :
+                'Передача запуска Android ещё не наблюдалась. Новая попытка остаётся заблокированной.', 'error');
+            return;
+        }
+        var modal = Lampa.Modal;
+        var controller = Lampa.Controller;
+        var origin = controller && typeof controller.enabled === 'function' ? controller.enabled().name : '';
+        if (!modal || typeof modal.open !== 'function' || typeof modal.close !== 'function' ||
+            typeof modal.opened !== 'function' || typeof modal.render !== 'function' ||
+            !Lampa.Activity || typeof Lampa.Activity.active !== 'function' ||
+            !controller || typeof controller.windowTop !== 'function' || typeof controller.toggle !== 'function' ||
+            (origin !== 'settings' && origin !== 'settings_component') || modal.opened() ||
+            !window.$ || !bindAndroidRecoveryContext()) {
+            playbackDiagnosticRecord('recovery-refused', session, 'confirmation-unavailable');
+            notify('Штатное подтверждение Lampa недоступно. Запуск остаётся заблокированным.', 'error');
+            return;
+        }
+        var state = {
+            session: session, activity: Lampa.Activity.active(), origin: origin, opening: true,
+            below: controller.windowTop(), exitActivity: Lampa.Activity.active(), exitOrigin: origin,
+            summary: { diagnosticId: session.diagnosticId, phase: session.phase }
+        };
+        state.params = {
+            title: 'Разрешить новую попытку — Android',
+            html: window.$('<div></div>').text('Предыдущий Android-запрос нельзя гарантированно отменить. Разрешение новой попытки может привести к дополнительному позднему запуску. Подтверждайте только после возврата из плеера.'),
+            buttons: [
+                { name: 'Отмена', onSelect: function () { resolveAndroidRecovery(state, false); } },
+                { name: 'Разрешить новую попытку', onSelect: function () { resolveAndroidRecovery(state, true); } }
+            ],
+            onBack: function () { resolveAndroidRecovery(state, false); }
+        };
+        androidRecoveryConfirmation = state;
+        try {
+            modal.open(state.params);
+            if (!state.node) throw new Error('confirmation unavailable');
+        } catch (error) {
+            invalidateAndroidRecovery('confirmation-open-failed');
+            notify('Не удалось открыть подтверждение. Запуск остаётся заблокированным.', 'error');
+        }
+        state.opening = false;
+        // open() may complete a session, displace this window, or throw after DOM insertion.
+        if (!state.closed) {
+            var rendered = modal.render() && modal.render()[0];
+            var content = state.params.html[0];
+            while (content && content !== rendered) content = content.parentNode;
+            if (!state.node && rendered && rendered.parentNode && content === rendered) state.node = rendered;
+            var top = controller.windowTop();
+            if (state.node && rendered === state.node && top && top !== state.below && top.name === 'modal') state.frame = top;
+            if (!ownsAndroidRecovery(state) || pendingPlayback !== state.session) {
+                invalidateAndroidRecovery('confirmation-not-current');
+                if (!closeAndroidRecovery(state) && !state.node) retireAndroidRecovery(state);
+            }
+        }
+    }
+
     function completePlaybackSession(session, restore, reason) {
         if (!session || pendingPlayback !== session) {
             playbackDiagnosticRecord('completion-rejected', session, reason || 'session-not-current');
             return;
+        }
+        var confirmation = androidRecoveryConfirmation;
+        if (confirmation && confirmation.session === session) {
+            if (ownsAndroidRecovery(confirmation)) resolveAndroidRecovery(confirmation, false, 'session-completed');
+            else invalidateAndroidRecovery('session-completed');
         }
         var target = session.restoreOwner;
         playbackDiagnosticRecord('completion-accepted', session, reason || 'unspecified');
@@ -1539,8 +2015,12 @@
         var session = pendingPlayback;
         playbackDiagnosticRecord('player-external', session, session ? 'observed' : 'no-pending', !!data,
             session && session.data ? session.data === data : null);
-        if (!session || session.data !== data || session.phase === 'finished') return;
+        if (!session || session.data !== data || session.phase === 'finished' || session.internalStarted) {
+            if (abandonedPlaybackExists) playbackDiagnosticRecord('playback-event-rejected', session, 'unowned-external', !!data, false);
+            return;
+        }
         session.phase = 'external';
+        if (androidReturnState && androidReturnState.id === session.diagnosticId) androidReturnState.external = true;
         if (session.restoreOwner && typeof session.restoreOwner.playbackChanged === 'function') {
             session.restoreOwner.playbackChanged(session);
         }
@@ -1603,6 +2083,7 @@
         var status = null;
         var rows = [];
         var destroyed = false;
+        var exiting = false;
         var running = false;
         var loading = false;
         var playback = null;
@@ -1615,6 +2096,21 @@
         var resourceEntry = null;
         var resourceIndex = 0;
         var resourceScroll = 0;
+        var diagnosticCatalog = ++returnDiagnosticCatalogSequence;
+        var diagnosticController = null;
+        frame.diagnosticFolder = ++returnDiagnosticFolderSequence;
+
+        this.playbackContext = function () {
+            var enabled = Lampa.Controller.enabled();
+            var selected = rows[selectedIndex()];
+            return {
+                catalog: diagnosticCatalog, folder: frame.diagnosticFolder, current: current() && running && !exiting,
+                ready: !!root && !!root.parentNode && frame.items !== null,
+                content: !!diagnosticController && enabled.name === 'content' && enabled.controller === diagnosticController,
+                loading: loading, error: !!error, resources: !!resourceEntry,
+                navigationFocus: !!selected && /(?:^|\s)focus(?:\s|$)/.test(selected.className)
+            };
+        };
 
         function current() {
             if (destroyed || activeBrowser !== self) return false;
@@ -1669,6 +2165,7 @@
                     (playback && playback.phase === 'launching' ? '\u0417\u0430\u043f\u0443\u0441\u043a \u043f\u043b\u0435\u0435\u0440\u0430: Back \u2014 \u0432 \u043a\u0430\u0442\u0430\u043b\u043e\u0433; \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u044b\u0439 \u0437\u0430\u043f\u0443\u0441\u043a \u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d' : error));
             status.style.color = error && !loading ? '#ffb080' : '';
             root.setAttribute('aria-busy', loading ? 'true' : 'false');
+            observeAndroidReturn('context');
         }
 
         function renderRows() {
@@ -1697,6 +2194,7 @@
                     window.$(row).on('hover:enter click', function () {
                         if (view === renderGeneration) self.select(index);
                     });
+                    window.$(row).on('mousedown touchstart', androidReturnPointer);
                     window.$(row).on('hover:focus', function () {
                         if (view !== renderGeneration || destroyed || !running || !current()) return;
                         remember(index);
@@ -1709,6 +2207,7 @@
             }
             drawStatus();
             focus(selectedIndex(), true);
+            recordReturnDiagnostic('folder');
         }
 
         function cancelLoad() {
@@ -1738,8 +2237,10 @@
                     focus(selectedIndex(), true);
                     return;
                 }
+                var diagnosticFolder = forward ? ++returnDiagnosticFolderSequence : frame.diagnosticFolder;
                 if (forward) parents.push(frame);
                 frame = { id: id, title: title, items: items, index: 0, scroll: 0 };
+                frame.diagnosticFolder = diagnosticFolder;
                 resourceEntry = null;
                 error = '';
                 renderRows();
@@ -1775,6 +2276,7 @@
             playback = session;
             pendingPlayback = session;
             playbackDiagnosticRecord('pending-set', session, 'launch-approved');
+            beginAndroidReturn(session);
             play(entry, resource, session);
             drawStatus();
         }
@@ -1801,6 +2303,12 @@
             if (name === 'content') focus(selectedIndex(), true);
             else if (name === 'player' || name === 'player-loading' || name === 'player_panel' ||
                 name === 'player_rewind' || name === 'player_footer') Lampa.Controller.toggle('content');
+        };
+
+        this.playbackAbandoned = function (session) {
+            if (playback !== session) return;
+            playback = null;
+            if (!destroyed) drawStatus();
         };
 
         this.playerClosed = function (event) {
@@ -1830,7 +2338,7 @@
         };
 
         this.start = function () {
-            if (destroyed) return;
+            if (destroyed || exiting) return;
             var activity = Lampa.Activity && typeof Lampa.Activity.active === 'function' ? Lampa.Activity.active() : null;
             if (Lampa.Activity && typeof Lampa.Activity.active === 'function' &&
                 (!activity || activity.activity !== self.activity)) return;
@@ -1844,7 +2352,7 @@
                 playbackDiagnosticRecord('restore-owner-attached', pendingPlayback, 'component-start');
             }
             self.create();
-            Lampa.Controller.add('content', {
+            diagnosticController = {
                 toggle: function () { focus(selectedIndex(), true); },
                 up: function () { focus(selectedIndex() - 1, false); },
                 down: function () { focus(selectedIndex() + 1, false); },
@@ -1852,14 +2360,18 @@
                 right: function () {},
                 enter: function () { self.select(selectedIndex()); },
                 back: function () { self.back(); }
-            });
+            };
+            Lampa.Controller.add('content', diagnosticController);
             Lampa.Controller.toggle('content');
+            if (!current() || controllerName() !== 'content' ||
+                (typeof Lampa.Controller.windowTop === 'function' && Lampa.Controller.windowTop())) return;
             if (frame.items === null && !loading) load(frame.id, frame.title, false);
             else focus(selectedIndex(), true);
         };
 
         this.select = function (index) {
             if (!running || !current() || loading) return;
+            if (!consumeAndroidReturnInput()) return;
             var items = resourceEntry ? resourceEntry.resources : (frame.items || []);
             if (!items.length) {
                 if (frame.items === null) load(frame.id, frame.title, false);
@@ -1887,7 +2399,35 @@
             save();
             if (resourceEntry) { resourceEntry = null; renderRows(); return; }
             if (parents.length) { frame = parents.pop(); error = ''; renderRows(); }
-            else { self.pause(); Lampa.Activity.backward(); }
+            else {
+                if (controllerName() !== 'content' || (typeof Lampa.Controller.windowTop === 'function' &&
+                    Lampa.Controller.windowTop())) return;
+                var history = typeof Lampa.Activity.all === 'function' ? Lampa.Activity.all() : [];
+                var previous = history.length > 1 ? history[history.length - 2] : null;
+                var departing = Lampa.Activity.active();
+                exiting = true;
+                self.pause();
+                // backward() starts the previous Activity synchronously; destroy follows later.
+                try { Lampa.Activity.backward(); }
+                finally {
+                    if (!destroyed && Lampa.Activity.active() === departing) {
+                        exiting = false;
+                        if (current()) {
+                            running = true; // Keep the catalog usable without taking focus from an overlay.
+                            if (controllerName() === 'content' && typeof Lampa.Controller.windowTop === 'function' &&
+                                !Lampa.Controller.windowTop()) self.start();
+                        }
+                    }
+                }
+                if (!previous || Lampa.Activity.active() !== previous ||
+                    controllerName() !== 'content' || typeof Lampa.Controller.windowTop !== 'function' ||
+                    Lampa.Controller.windowTop() || !Lampa.Settings || typeof Lampa.Settings.create !== 'function') return;
+                Lampa.Controller.toggle('settings');
+                // Settings open/toggle listeners may synchronously navigate or open another window.
+                if (Lampa.Activity.active() !== previous || controllerName() !== 'settings' ||
+                    Lampa.Controller.windowTop()) return;
+                Lampa.Settings.create(COMPONENT);
+            }
         };
 
         this.refresh = function () {
@@ -1897,10 +2437,12 @@
         this.pause = function () {
             playbackDiagnosticRecord('browser-pause', playback || pendingPlayback, 'component-pause');
             save(); cancelLoad(); running = false;
+            if (androidReturnState && androidReturnState.catalog === diagnosticCatalog) resetAndroidReturnCycle();
             if (playback && playback.restoreOwner === self) {
                 playback.restoreOwner = null;
                 playbackDiagnosticRecord('restore-owner-detached', playback, 'component-pause');
             }
+            recordReturnDiagnostic('pause');
         };
         this.stop = this.pause;
         this.isCurrent = current;
@@ -1925,6 +2467,7 @@
             rows = [];
             parents = [];
             resourceEntry = null;
+            recordReturnDiagnostic('destroy');
         };
     }
 
@@ -1968,6 +2511,10 @@
                     if (closeDataRead && event && closeData === pendingPlayback.data && pendingPlayback.data) completePlaybackSession(pendingPlayback, true, 'close-data-identity');
                     else playbackDiagnosticRecord('completion-rejected', pendingPlayback,
                         hasCloseData ? 'close-data-mismatch' : 'close-data-missing', hasCloseData, closeMatches);
+                    return;
+                }
+                if (abandonedPlaybackExists) {
+                    playbackDiagnosticRecord('playback-event-rejected', null, 'unowned-close', hasCloseData, false);
                     return;
                 }
                 if (activeBrowser) { activeBrowser.playerClosed(event); return; }
@@ -2036,6 +2583,7 @@
         try {
             registerPlayerCloseListener();
             registerPlayerExternalListener();
+            bindAndroidReturn();
             registerPlaybackDiagnosticListeners();
             bindSettingsLifecycle();
             addTranslations();
@@ -2060,6 +2608,13 @@
                 param: { name: PREFIX + 'clear_cache', type: 'trigger', default: false },
                 field: { name: translated('dlna_bridge_clear', 'Очистить кеш каталога') },
                 onChange: function () { cache = {}; notify('Кеш каталога очищен.', 'success'); }
+            });
+
+            registerParam('androidRecoveryParam', {
+                component: COMPONENT,
+                param: { name: PREFIX + 'android_recovery', type: 'trigger', default: false },
+                field: { name: 'Разрешить новую попытку — Android' },
+                onChange: requestAndroidRecovery
             });
 
             registerParam('androidDiagnosticParam', {

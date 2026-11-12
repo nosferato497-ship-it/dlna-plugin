@@ -217,6 +217,7 @@ function createHarness(options) {
     };
     Lampa.Listener = options.withoutListener ? null : {
         follow: function (name, callback) {
+            if (name !== 'app') return;
             followCalls++;
             if (followMode === 'before') {
                 followMode = '';
@@ -310,6 +311,7 @@ function createHarness(options) {
         enableListener: function () {
             Lampa.Listener = {
                 follow: function (name, callback) {
+                    if (name !== 'app') return;
                     followCalls++;
                     readyHandlers.push(callback);
                 }
