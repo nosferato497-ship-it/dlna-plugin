@@ -167,6 +167,10 @@ function componentHarness(options) {
     var controller = 'home';
     var requests = [];
     var timers = [];
+    var returnTasks = [];
+    var returnEvents = [];
+    var inputEvents = [];
+    var timeoutSequence = 0;
     var played = [];
     var notices = [];
     var notyCalls = [];
@@ -182,7 +186,19 @@ function componentHarness(options) {
     var contentToggles = 0;
     var settingsClosed = 0;
     var active = null;
+    var activityStack = [];
+    var activityListener = createListener();
+    var settingsName = null;
+    var settingsVisible = false;
+    var settingsOpens = [];
+    var settingsRows = [];
+    var settingsIndex = 0;
+    var navigation = [];
+    var settingsBody;
+    var settingsMain;
+    var addressState = '';
     var document;
+    var documentFocused = true;
     function element(tag) {
         var node = { tag: tag, style: {}, children: [], events: {}, attributes: {}, parentNode: null,
             className: '', textContent: '', scrollTop: 0, clientHeight: 300, offsetHeight: 50, offsetTop: 0,
@@ -205,15 +221,43 @@ function componentHarness(options) {
         return node;
     }
     document = { body: element('body'), activeElement: null, createElement: element, getElementById: function () { return null; }, hidden: false, addEventListener: function (name, fn) { (this.events[name] || (this.events[name] = [])).push(fn); }, removeEventListener: function (name, fn) { this.events[name] = (this.events[name] || []).filter(function (f) { return f !== fn; }); }, events: {} };
+    document.visibilityState = 'visible';
+    if (!options.noDocumentFocus) document.hasFocus = function () {
+        if (options.throwDocumentFocus) throw new Error('hasFocus unavailable');
+        return documentFocused;
+    };
+    document.querySelector = function (selector) {
+        var found = null;
+        function visit(node) {
+            if (selector.split(',').some(function (part) { return (' ' + node.className + ' ').indexOf(' ' + part.substring(1) + ' ') >= 0; })) found = node;
+            node.children.forEach(visit);
+        }
+        visit(document.body); return found;
+    };
     function dispatch(node, name) { (node.events[name] || []).slice().forEach(function (fn) { fn({ target: node }); }); }
     function $(node) {
+        if (typeof node === 'string') node = element('div');
         var nodes = Array.isArray(node) ? node : [node];
         return { 0: nodes[0], length: nodes.length,
             on: function (names, fn) { nodes.forEach(function (item) { names.split(' ').forEach(function (name) { item.addEventListener(name, fn); }); }); return this; },
+            text: function (value) { nodes[0].textContent = value; return this; },
             off: function () { nodes.forEach(function (item) { item.events = {}; }); return this; },
             find: function () { return $(nodes[0].querySelectorAll('.selector')); }
         };
     }
+    var modalListener = createListener();
+    var controllerListener = createListener();
+    var globalListener = createListener();
+    var windows = [];
+    var modal = null;
+    var modalOpened = false;
+    var modalHook = null;
+    function modalStage(stage, own) { if (modalHook) modalHook(stage, own); }
+    var confirmations = [];
+    var nativePlayers = [];
+    var nativeLaunches = [];
+    var settingsRow = element('div');
+    settingsRow.addEventListener('hover:enter', function () { recover(); });
     var settingsListener = createListener();
     var playerListener = createListener();
     var selectListener = createListener();
@@ -222,24 +266,47 @@ function componentHarness(options) {
         SettingsApi: { addComponent: function () {}, addParam: function (param) { params.push(param); } },
         Storage: { field: function () { return ''; } },
         Lang: { add: function () {}, translate: function (value) { return value; } },
-        Listener: { follow: function () {} },
+        Listener: globalListener,
+        Platform: { is: function (name) { return name === 'android'; } },
         Settings: { listener: settingsListener },
         Noty: { show: function (message, params) { notices.push(message); notyCalls.push({ message: message, params: params || {} }); } },
         Component: { add: function (name, constructor) { registry[name] = constructor; } },
         Activity: {
+            listener: activityListener,
+            all: function () { return activityStack; },
+            mixState: function (value) { addressState = value || ''; },
             active: function () { return active; },
             push: function (params) {
-                if (active && active.activity && active.activity.component) active.activity.component.pause();
+                globalListener.send('activity', { type: 'init' });
+                if (active && active.activity && active.activity.component.pause) active.activity.component.pause();
                 var screen = new registry[params.component](params);
                 var slide = { component: screen, loader: function () {} };
                 screen.activity = slide;
                 active = { component: params.component, activity: slide };
+                if (options.nativeNavigation) activityStack.push(active);
                 pushed.push(active);
                 screen.create();
                 document.body.appendChild(screen.render(true));
-                screen.start();
+                if (options.nativeNavigation) startActivity(active);
+                else screen.start();
             },
             backward: function () {
+                if (options.nativeNavigation) {
+                    activityListener.send('backward', { count: activityStack.length });
+                    backwards++;
+                    if (options.backwardThrows) throw new Error('backward failure');
+                    if (activityStack.length === 1) return;
+                    var departedActivity = activityStack.pop();
+                    timers.push({ delay: 200, callback: function () {
+                        departedActivity.activity.component.destroy();
+                        globalListener.send('activity', { type: 'destroy', object: departedActivity });
+                    } });
+                    active = activityStack[activityStack.length - 1];
+                    startActivity(active);
+                    globalListener.send('activity', { type: 'archive', object: active });
+                    return;
+                }
+                globalListener.send('activity', { type: 'destroy' });
                 backwards++;
                 if (active && active.activity) { var departed = active.activity.component; if (options.delayedDestroy) timers.push({ callback: function () { departed.destroy(); }, delay: 200 }); else departed.destroy(); }
                 active = null;
@@ -247,11 +314,29 @@ function componentHarness(options) {
             }
         },
         Controller: {
+            listener: controllerListener,
             add: function (name, callbacks) { controllers[name] = callbacks; },
-            enabled: function () { return { name: controller }; },
-            toggle: function (name) { if (name === 'content') { contentToggles++; if (controller === 'settings') settingsClosed++; } controller = name; if (controllers[name] && controllers[name].toggle) controllers[name].toggle(); },
-            collectionSet: function () {},
-            collectionFocus: function (row) { document.activeElement = row; dispatch(row, 'hover:focus'); }
+            enabled: function () { return { name: controller, controller: controllers[controller] }; },
+            toggle: function (name) {
+                if (options.nativeNavigation && controllers[controller] && controllers[controller].gone) controllers[controller].gone(name);
+                if (name === 'content') {
+                    contentToggles++; if (controller === 'settings') settingsClosed++;
+                    if (options.nativeNavigation && settingsVisible) { settingsVisible = false; settingsName = null; settingsListener.send('close'); }
+                }
+                controller = name;
+                if (controllers[name] && controllers[name].toggle) controllers[name].toggle();
+                controllerListener.send('toggle', { name: name });
+            },
+            // Lampa 6b5d921: Controller.enter dispatches once to its active handler OR focused node.
+            enter: function () { if (controllers[controller] && controllers[controller].enter) controllers[controller].enter(); else if (document.activeElement) dispatch(document.activeElement, 'hover:enter'); },
+            windowOpen: function (name, check) { var entry = { name: name, below: controller, check: check }; windows.push(entry); return entry; },
+            windowTop: function () { windows = windows.filter(function (entry) { return !entry.check || entry.check(); }); return windows[windows.length - 1] || false; },
+            windowClose: function (entry) { var i = windows.indexOf(entry); if (i < 0) return; var top = i === windows.length - 1; windows.splice(i, 1); var below = Lampa.Controller.windowTop(); if (top && controller === entry.name && below && below.name === entry.below) Lampa.Controller.toggle(below.name); },
+            collectionSet: function (html) { navigation = (html[0] || html).querySelectorAll('.selector'); },
+            collectionFocus: function (row) {
+                document.body.querySelectorAll('.selector').forEach(function (node) { node.className = node.className.replace(/\s+focus\b/g, ''); });
+                row.className += ' focus'; document.activeElement = row; dispatch(row, 'hover:focus');
+            }
         },
         Select: { listener: selectListener, show: function () { throw new Error('Diagnostic log must not open Select'); } },
         Keypad: { listener: keypadListener },
@@ -262,7 +347,7 @@ function componentHarness(options) {
             play: function (data) { if (options.playerThrows) throw Error('Player failure'); played.push(data);
                 var run = true; playerListener.send('create', { data: data, abort: function () { run = false; } });
                 if (!run) return;
-                function begin() { launches.push(data); if (options.externalPlayer) playerListener.send('external', data); else { playerListener.send('start', data); playerOpened = true; controller = 'player'; } }
+                function begin() { launches.push(data); if (options.externalPlayer) { nativePlayers.push(data); playerListener.send('external', data); } else { playerListener.send('start', data); playerOpened = true; controller = 'player'; } }
                 if (options.deferredPlayer) pendingPlayers.push(begin); else begin(); }
         },
         Reguest: function () {
@@ -271,6 +356,137 @@ function componentHarness(options) {
             this.native = function (url, success, failure, body, params) { requests.push({ url: url, success: success, failure: failure, body: body, params: params }); };
         }
     };
+    // Opt-in navigation model: backward pops/starts synchronously, destroys after 200ms.
+    // Settings is an overlay, not an Activity. create sends open BEFORE toggling its controller.
+    function startActivity(activity) {
+        Lampa.Controller.add('content', { back: function () { Lampa.Activity.backward(); } });
+        Lampa.Controller.toggle('content');
+        addressState = 'activity=' + activity.component;
+        if (activity.activity.component.start) activity.activity.component.start();
+        globalListener.send('activity', { type: 'start', object: activity });
+    }
+    if (options.nativeNavigation) {
+        active = { component: 'main', activity: { component: {} } };
+        activityStack.push(active);
+        settingsBody = element('settings-body'); document.body.appendChild(settingsBody);
+        settingsMain = element('settings-main');
+        var mainRow = element('setting'); mainRow.className = 'selector'; settingsMain.appendChild(mainRow);
+        mainRow.addEventListener('hover:enter', function () { Lampa.Settings.create('dlna_bridge'); });
+        function settingsContent(node) {
+            if (node.parentNode) node.parentNode.removeChild(node);
+            while (settingsBody.firstChild) settingsBody.removeChild(settingsBody.firstChild);
+            settingsBody.appendChild(node);
+        }
+        Lampa.Controller.add('settings', {
+            toggle: function () {
+                if (settingsMain.parentNode) settingsMain.parentNode.removeChild(settingsMain);
+                settingsName = 'main'; settingsOpens.push('main');
+                settingsListener.send('open', { name: 'main' });
+                settingsContent(settingsMain);
+                Lampa.Controller.collectionSet($(settingsMain));
+                Lampa.Controller.collectionFocus(mainRow, $(settingsMain));
+                settingsVisible = true;
+                Lampa.Activity.mixState('settings=main');
+            },
+            gone: function (to) { if (to !== 'settings_component') settingsVisible = false; },
+            back: function () {
+                if (settingsMain.parentNode) settingsMain.parentNode.removeChild(settingsMain);
+                Lampa.Controller.toggle('head'); Lampa.Activity.mixState(); settingsListener.send('close');
+            }
+        });
+        Lampa.Settings.create = function (name) {
+            var componentBody = element('settings-component');
+            settingsRows = params.filter(function (param) { return param.component === name; }).map(function (param) {
+                var row = element('setting'); row.className = 'selector'; componentBody.appendChild(row);
+                row.param = param;
+                row.addEventListener('hover:enter', param.onChange || function () {});
+                return row;
+            });
+            settingsIndex = 0;
+            Lampa.Controller.add('settings_component', {
+                toggle: function () { Lampa.Controller.collectionSet($(componentBody)); Lampa.Controller.collectionFocus(settingsRows[settingsIndex], $(componentBody)); },
+                up: function () { settingsIndex = Math.max(0, settingsIndex - 1); document.activeElement = settingsRows[settingsIndex]; },
+                down: function () { settingsIndex = Math.min(settingsRows.length - 1, settingsIndex + 1); document.activeElement = settingsRows[settingsIndex]; },
+                back: function () { Lampa.Controller.toggle('settings'); }
+            });
+            settingsContent(componentBody);
+            settingsOpens.push(name);
+            settingsListener.send('open', { name: name, body: settingsRows });
+            settingsName = name;
+            Lampa.Controller.toggle('settings_component');
+            Lampa.Activity.mixState('settings=' + name);
+        };
+        Lampa.Select.show = function (params) {
+            selectListener.send('preshow', { active: params });
+            var node = element('select'); node.className = 'selectbox--open'; var row = element('button'); row.className = 'selector'; node.appendChild(row);
+            row.addEventListener('hover:enter', function () { params.onSelect(params.items[0]); });
+            document.body.appendChild(node);
+            selectListener.send('fullshow', { active: params, html: [node] });
+            Lampa.Activity.mixState('select=open');
+            var frame = Lampa.Controller.windowOpen('select', function () { return !!node.parentNode; });
+            Lampa.Controller.add('select', {
+                toggle: function () { Lampa.Controller.collectionSet($(node)); Lampa.Controller.collectionFocus(row, $(node)); },
+                back: function () { node.parentNode.removeChild(node); Lampa.Controller.windowClose(frame); }
+            });
+            Lampa.Controller.toggle('select');
+            return node;
+        };
+    }
+    // Contract model of native Modal.open/buttons/register/close at Lampa 6b5d921.
+    // No custom plugin stack; close() uses Controller.windowClose, not a test toggle to content.
+    function registerModal(own) {
+        Lampa.Controller.add('modal', {
+            toggle: function () {
+                if (options.nativeNavigation) Lampa.Controller.collectionSet($(own.node));
+                document.activeElement = own.buttons[0];
+            },
+            down: function () { document.activeElement = own.buttons[1]; },
+            up: function () { document.activeElement = own.buttons[0]; },
+            back: own.params.onBack
+        });
+    }
+    Lampa.Modal = {
+        listener: modalListener,
+        open: function (params) {
+            var own = { params: params, node: null, buttons: [], previous: modalOpened ? modal : null };
+            modalListener.send('preshow', { active: params });
+            modalStage('before-dom', own);
+            own.node = element('modal');
+            own.node.className = 'modal';
+            modal = own; confirmations.push(own);
+            document.body.appendChild(own.node);
+            if (params.html) own.node.appendChild(params.html[0]);
+            params.buttons.forEach(function (button) {
+                var node = element('button'); own.buttons.push(node);
+                if (options.nativeNavigation) { node.className = 'selector'; own.node.appendChild(node); }
+                node.addEventListener('hover:enter', function () { button.onSelect(); });
+            });
+            modalStage('after-dom', own);
+            modalListener.send('fullshow', { active: params, html: [own.node] });
+            own.frame = Lampa.Controller.windowOpen('modal', function () { return !!own.node.parentNode; });
+            registerModal(own);
+            Lampa.Controller.toggle('modal');
+            modalStage('after-toggle', own);
+            modalOpened = true;
+            modalStage('after-open', own);
+        },
+        opened: function () { return modalOpened; },
+        render: function () { return [modal && modal.node]; },
+        close: function () {
+            var own = modal;
+            own.node.parentNode.removeChild(own.node);
+            modalListener.send('close', { active: own.params });
+            modalOpened = false; modal = own.previous;
+            if (modal) { modalOpened = true; registerModal(modal); }
+            if (own.frame) Lampa.Controller.windowClose(own.frame);
+        }
+    };
+    if (!options.nativeNavigation) Lampa.Controller.add('settings_component', { toggle: function () { document.activeElement = settingsRow; } });
+    function recover() {
+        var param = params.filter(function (item) { return item.param.name === 'dlna_bridge_android_recovery'; })[0];
+        assert.ok(param, 'Android recovery action registered'); param.onChange();
+    }
+    function settingsRecovery() { Lampa.Controller.toggle('settings_component'); recover(); }
     if (options.preCreateAbort) playerListener.follow('create', function (event) { event.abort(); });
     if (options.listenerNoRemove) playerListener.remove = undefined;
     var window = { Lampa: Lampa, appready: false, DOMParser: TestDOMParser, $: $,
@@ -278,19 +494,73 @@ function componentHarness(options) {
         removeEventListener: function (name, fn) { windowEvents[name] = (windowEvents[name] || []).filter(function (f) { return f !== fn; }); } };
     var source = fs.readFileSync(path.join(__dirname, '..', 'plugin.js'), 'utf8').replace(
         'if (window.appready) init();',
-        'window.__test = { init: init, openCatalog: openCatalog, cache: cache }; if (window.appready) init();'
+        'window.__test = { init: init, openCatalog: openCatalog, cache: cache, records: playbackDiagnosticRecords, observation: function () { return returnDiagnosticAttempt; }, pending: function () { return pendingPlayback; }, autoReturn: function () { return androidReturnState; }, returnInput: function () { return androidReturnInput; } }; if (window.appready) init();'
     );
+    if (options.failDiagnosticWrites) source = source.replace('var playbackDiagnosticRecords = [];', 'var playbackDiagnosticRecords = []; playbackDiagnosticRecords.push = function () { throw new Error("diagnostic write failed"); };');
+    if (options.failDiagnosticRegistration) source = source.replace('registerPlaybackDiagnosticListeners();', '/* diagnostic subscriptions unavailable */');
     vm.runInNewContext(source, { window: window, Lampa: Lampa, document: document, DOMParser: TestDOMParser,
         console: { log: function () {}, error: function () {} },
-        setTimeout: function (fn, delay) { timers.push({ callback: fn, delay: delay }); return timers.length; }, clearTimeout: function () {}
+        setTimeout: function (fn, delay) {
+            var task = { callback: fn, delay: delay, id: ++timeoutSequence };
+            (delay === 0 ? returnTasks : timers).push(task); return task.id;
+        }, clearTimeout: function (id) {
+            [timers, returnTasks].forEach(function (queue) {
+                for (var i = queue.length - 1; i >= 0; i--) if (queue[i].id === id) queue.splice(i, 1);
+            });
+        }
     });
     window.__test.init();
     var api = window.__test;
     function screen() { return active && active.activity.component; }
     function root() { return screen().render(true); }
     function viewport() { return root().children[2]; }
+    function emitReturn(type) {
+        if (type === 'hidden' || type === 'visible') {
+            document.hidden = type === 'hidden'; document.visibilityState = type;
+            dispatch(document, 'visibilitychange');
+        } else {
+            documentFocused = type === 'focus';
+            (windowEvents[type] || []).slice().forEach(function (fn) { fn(); });
+        }
+    }
+    function emitInput(type, repeat) {
+        var event = { code: 13, enabled: true, event: { repeat: !!repeat } };
+        keypadListener.send(type, event);
+        if (type === 'keyup') { keypadListener.send('enter', event); Lampa.Controller.enter(); }
+    }
     return {
+        returnTasks: returnTasks, returnEvents: returnEvents, inputEvents: inputEvents,
+        queueReturn: function (type) { returnEvents.push(function () { emitReturn(type); }); },
+        queueInput: function (type, repeat) { inputEvents.push(function () { emitInput(type, repeat); }); },
+        nextReturn: function () { assert.ok(returnEvents.length); returnEvents.shift()(); },
+        nextInput: function () { assert.ok(inputEvents.length); inputEvents.shift()(); },
+        flushReturnTasks: function () { while (returnTasks.length) returnTasks.shift().callback(); },
+        freshOK: function () { emitInput('keydown'); emitInput('keyup'); },
+        navigation: function () { return navigation; },
+        settingsBody: function () { return settingsBody; },
+        addressState: function () { return addressState; },
+        settingsName: function () { return settingsName; },
+        settingsVisible: function () { return settingsVisible; },
+        settingsOpens: settingsOpens,
+        settingsBoot: function () { Lampa.Controller.toggle('settings'); Lampa.Settings.create('dlna_bridge'); },
+        setting: function (name) {
+            var index = settingsRows.findIndex(function (row) { return row.param.param.name === 'dlna_bridge_' + name; });
+            assert.ok(index >= 0, name);
+            while (settingsIndex < index) controllers[controller].down();
+            while (settingsIndex > index) controllers[controller].up();
+            Lampa.Controller.enter();
+        },
         launches: launches, pendingPlayers: pendingPlayers,
+        nativePlayers: nativePlayers, nativeLaunches: nativeLaunches, confirmations: confirmations,
+        modalHook: function (fn) { modalHook = fn; },
+        modalNodes: function () { return document.body.children.filter(function (node) { return confirmations.some(function (own) { return own.node === node; }); }).length; },
+        modalWindows: function () { Lampa.Controller.windowTop(); return windows.length; },
+        beginNative: function (index) { assert.ok(nativePlayers.length); nativeLaunches.push(nativePlayers.splice(index || 0, 1)[0]); },
+        recover: recover, settingsRecovery: settingsRecovery,
+        // Native keyup sends enter before Controller.enter; it does not redispatch after a modal closes.
+        keyup: function () { emitInput('keyup'); },
+        recoveryHandlers: function () { return [globalListener.count('activity'), controllerListener.count('toggle'), modalListener.count('preshow'), modalListener.count('fullshow'), modalListener.count('close')].join(','); },
+        foreignActivity: function () { globalListener.send('activity', { type: 'init' }); active = { component: 'foreign' }; Lampa.Controller.toggle('foreign'); },
         Lampa: Lampa, api: api, requests: requests, timers: timers, played: played, notices: notices, pushed: pushed,
         document: document, settings: settingsListener, screen: screen, root: root, viewport: viewport,
         rows: function () { return viewport().children[0].children; },
@@ -299,6 +569,7 @@ function componentHarness(options) {
         open: function () { var param = params.filter(function (p) { return p.param.name === 'dlna_bridge_open_catalog'; })[0]; assert.ok(param); param.onChange(); },
         press: function (name) { if (controllers[controller] && controllers[controller][name]) controllers[controller][name](); },
         click: function (row) { dispatch(row, 'click'); },
+        pointerDown: function (row) { dispatch(row, 'mousedown'); },
         scroll: function (position) { viewport().scrollTop = position; dispatch(viewport(), 'scroll'); },
         controller: function () { return controller; },
         backCount: function () { return backwards; },
@@ -310,9 +581,9 @@ function componentHarness(options) {
         closeEvent: function (data) { playerOpened = false; playerListener.send('close', data ? { data: data } : {}); },
         callback: function (index) { playerCallbacks[index === undefined ? playerCallbacks.length - 1 : index](); },
         beginPlayer: function () { assert.ok(pendingPlayers.length); pendingPlayers.shift()(); },
-        focusWindow: function () { (windowEvents.focus || []).slice().forEach(function (fn) { fn(); }); },
-        blurWindow: function () { (windowEvents.blur || []).slice().forEach(function (fn) { fn(); }); },
-        visibility: function (hidden) { document.hidden = hidden; dispatch(document, 'visibilitychange'); },
+        focusWindow: function () { emitReturn('focus'); },
+        blurWindow: function () { emitReturn('blur'); },
+        visibility: function (hidden) { emitReturn(hidden ? 'hidden' : 'visible'); },
         contentToggles: function () { return contentToggles; },
         settingsClosed: function () { return settingsClosed; },
         externalHandlers: function () { return playerListener.count('external'); },
@@ -575,8 +846,8 @@ test('session completion after destroy cannot restore a controller', function ()
     var h = componentHarness(); h.open(); h.reply([video()]); h.press('enter'); h.screen().destroy();
     h.Lampa.Controller.add('settings', {}); h.Lampa.Controller.toggle('settings');
     h.callback(); h.closeEvent(h.played[0]); assert.strictEqual(h.controller(), 'settings');
-    assert.strictEqual(h.windowHandlers(), 0); assert.strictEqual(h.externalHandlers(), 1);
-    assert.strictEqual(h.closeHandlers(), 1); assert.strictEqual(h.visibilityHandlers(), 0);
+    assert.strictEqual(h.windowHandlers(), 4); assert.strictEqual(h.externalHandlers(), 1);
+    assert.strictEqual(h.closeHandlers(), 1); assert.strictEqual(h.visibilityHandlers(), 2);
 });
 
 test('session completion after Activity displacement does not steal its controller', function () {
@@ -647,10 +918,10 @@ test('external event for another payload and unpaired visibility cannot unlock a
 test('repeated opening adds no duplicate external or DOM listeners', function () {
     var h = componentHarness(); h.open(); h.reply([video()]); h.open(); h.resumed();
     assert.strictEqual(h.externalHandlers(), 1); assert.strictEqual(h.closeHandlers(), 1);
-    assert.strictEqual(h.windowHandlers(), 0); assert.strictEqual(h.visibilityHandlers(), 0);
+    assert.strictEqual(h.windowHandlers(), 4); assert.strictEqual(h.visibilityHandlers(), 2);
     h.press('back'); assert.strictEqual(h.externalHandlers(), 1); h.open();
     assert.strictEqual(h.externalHandlers(), 1); assert.strictEqual(h.closeHandlers(), 1);
-    assert.strictEqual(h.windowHandlers(), 0); assert.strictEqual(h.visibilityHandlers(), 0);
+    assert.strictEqual(h.windowHandlers(), 4); assert.strictEqual(h.visibilityHandlers(), 2);
 });
 
 test('plugin-lifetime Player observers remain active when listener.remove is absent', function () {
@@ -1000,7 +1271,7 @@ test('notification pages use a fixed safe snapshot and leave Select, Keypad, cac
     }
     assert.strictEqual(new Set(allNumbers).size, allNumbers.length);
     assert.strictEqual(Math.max.apply(Math, allNumbers), Math.max.apply(Math, firstNumbers));
-    assert.strictEqual(h.selectObserverCount(), 0);
+    assert.strictEqual(h.selectObserverCount(), 1);
     assert.strictEqual(h.keypadBackHandlers(), 0);
     assert.strictEqual(h.controller(), controller);
     assert.strictEqual(h.api.cache, cache);
@@ -1031,7 +1302,7 @@ test('empty journal, previous-before-show, end of snapshot, and clear are explic
     assert.strictEqual(h.api.cache, cache);
     assert.strictEqual(h.played.length, 0);
     assert.strictEqual(h.requests.length, 0);
-    assert.strictEqual(h.selectObserverCount(), 0);
+    assert.strictEqual(h.selectObserverCount(), 1);
     assert.strictEqual(h.keypadBackHandlers(), 0);
 });
 
@@ -1115,10 +1386,10 @@ test('playback diagnostics preserve lock and explain close without data or with 
 test('diagnostic log pagination keeps the cap at 100 and adds no Select or Keypad subscriptions', function () {
     var h = componentHarness();
     assert.strictEqual(h.createHandlers(), 1);
-    assert.strictEqual(h.startHandlers(), 1);
+    assert.strictEqual(h.startHandlers(), 2);
     h.api.init();
     assert.strictEqual(h.createHandlers(), 1);
-    assert.strictEqual(h.startHandlers(), 1);
+    assert.strictEqual(h.startHandlers(), 2);
     for (var i = 0; i < 130; i++) h.Lampa.Player.listener.send('start', {});
 
     h.showPlaybackDiagnosticLog();
@@ -1133,10 +1404,9 @@ test('diagnostic log pagination keeps the cap at 100 and adds no Select or Keypa
     pages.forEach(function (page) { allNumbers = allNumbers.concat(diagnosticNumbers(page)); });
     allNumbers = allNumbers.filter(function (number) { return number !== null; });
     assert.strictEqual(allNumbers.length, 100);
-    assert.strictEqual(Math.min.apply(Math, allNumbers), 31);
-    assert.strictEqual(Math.max.apply(Math, allNumbers), 130);
+    assert.strictEqual(Math.max.apply(Math, allNumbers) - Math.min.apply(Math, allNumbers), 99);
     assert.match(current, /No older playback diagnostic events remain/);
-    assert.strictEqual(h.selectObserverCount(), 0);
+    assert.strictEqual(h.selectObserverCount(), 1);
     assert.strictEqual(h.keypadBackHandlers(), 0);
 });
 
@@ -1179,6 +1449,885 @@ test('playback diagnostic log records owner pause, destruction, reopen and hando
     assert.strictEqual(h.played.length, 1);
     assert.strictEqual(h.title(), 'DLNA');
     assert.strictEqual(h.requests.length, 0);
-    assert.strictEqual(h.selectObserverCount(), 0);
+    assert.strictEqual(h.selectObserverCount(), 1);
     assert.strictEqual(h.keypadBackHandlers(), 0);
+});
+
+// Android recovery uses user permission, never a synthetic Android completion signal.
+function externalRecoveryHarness(options) {
+    var h = componentHarness(Object.assign({ externalPlayer: true }, options));
+    h.open(); h.reply(options && options.entries || [video()]); h.press('enter'); return h;
+}
+function allowAndroidRetry(h) {
+    h.settingsRecovery(); h.press('down'); h.keyup();
+    assert.strictEqual(h.controller(), 'settings_component');
+}
+function drainAndroid(h) {
+    while (h.pendingPlayers.length) h.beginPlayer();
+    while (h.returnEvents.length) h.nextReturn();
+    while (h.inputEvents.length) h.nextInput();
+    h.flushReturnTasks();
+    while (h.nativePlayers.length) h.beginNative();
+}
+
+test('Android recovery refuses no pending, internal playback and an unavailable confirmation API', function () {
+    var h = componentHarness(); h.settingsRecovery();
+    assert.match(h.lastNotice().message, /Незавершённого запуска нет/);
+    h.open(); h.reply([video()]); h.press('enter'); h.settingsRecovery();
+    assert.match(h.lastNotice().message, /встроенному плееру/); assert.strictEqual(h.confirmations.length, 0);
+    h.Lampa.Player.listener.send('external', h.played[0]); h.recover();
+    assert.strictEqual(h.confirmations.length, 0);
+    h.closePlayer(); h.open(); h.press('enter'); assert.strictEqual(h.played.length, 2);
+    var a = externalRecoveryHarness(); a.Lampa.Modal = undefined; a.settingsRecovery();
+    assert.match(a.lastNotice().message, /подтверждение.*недоступно/); a.open(); a.press('enter');
+    assert.strictEqual(a.played.length, 1); drainAndroid(a);
+});
+
+test('Android recovery cannot bypass delayed dispatch, create.abort or a foreign external payload', function () {
+    [false, true].forEach(function (abort) {
+        var h = externalRecoveryHarness({ deferredPlayer: true, preCreateAbort: abort });
+        h.Lampa.Player.listener.send('external', { url: h.played[0].url }); h.settingsRecovery();
+        assert.match(h.lastNotice().message, /ещё не наблюдалась/);
+        assert.strictEqual(h.confirmations.length, 0); h.open(); h.press('enter');
+        assert.strictEqual(h.played.length, 1); drainAndroid(h);
+        assert.strictEqual(h.launches.length, abort ? 0 : 1);
+    });
+});
+
+['cancel', 'back', 'default-enter'].forEach(function (method) {
+    test('Android recovery ' + method + ' preserves the external lock', function () {
+        var h = externalRecoveryHarness(); h.settingsRecovery();
+        assert.match(h.confirmations[0].params.html[0].textContent, /нельзя гарантированно отменить/);
+        if (method === 'cancel') h.confirmations[0].params.buttons[0].onSelect();
+        else if (method === 'back') h.press('back'); else h.keyup();
+        assert.strictEqual(h.controller(), 'settings_component'); h.open(); h.press('enter');
+        assert.strictEqual(h.played.length, 1);
+        assert.match(readPlaybackDiagnosticPages(h), /recovery-cancelled/); drainAndroid(h);
+    });
+});
+
+[false, true].forEach(function (differentFile) {
+    test('Android permission itself does not play; a separate selection plays ' + (differentFile ? 'another' : 'the same') + ' file', function () {
+        var h = externalRecoveryHarness({ entries: [video(), { id: 'other', title: 'Other', url: 'http://media/other.mp4' }] });
+        var first = h.played[0];
+        allowAndroidRetry(h); assert.strictEqual(h.played.length, 1);
+        var state = h.confirmations[0]; state.params.buttons[1].onSelect();
+        assert.strictEqual(h.controller(), 'settings_component');
+        h.open(); if (differentFile) h.press('down'); h.keyup();
+        assert.strictEqual(h.played.length, 2);
+        assert.strictEqual(h.played[1].url === first.url, !differentFile);
+        var lines = readPlaybackDiagnosticPages(h);
+        assert.match(lines, /recovery-accepted/); assert.match(lines, /playback-abandoned.*phase=abandoned/);
+        assert.doesNotMatch(lines, /completion-accepted|pending-cleared|phase=finished/);
+        drainAndroid(h); assert.strictEqual(h.nativeLaunches.length, 2);
+    });
+});
+
+test('Android stale confirmation and old callback/close/start/external cannot affect a newer attempt', function () {
+    var h = externalRecoveryHarness(); var first = h.played[0]; allowAndroidRetry(h);
+    var old = h.confirmations[0]; h.open(); h.press('enter');
+    h.settingsRecovery(); var current = h.confirmations[1];
+    old.params.buttons[1].onSelect(); old.params.onBack();
+    assert.strictEqual(h.Lampa.Modal.render()[0], current.node); assert.strictEqual(h.controller(), 'modal');
+    h.callback(0); h.closeEvent(first); h.Lampa.Player.listener.send('start', first); h.Lampa.Player.listener.send('external', first);
+    assert.strictEqual(h.controller(), 'modal'); h.press('back'); h.open(); h.press('enter');
+    assert.strictEqual(h.played.length, 2);
+    assert.match(readPlaybackDiagnosticPages(h), /recovery-confirm-stale/); drainAndroid(h);
+});
+
+test('Android real matching close during confirmation cannot authorize another current attempt', function () {
+    var h = externalRecoveryHarness(); h.settingsRecovery(); var dialog = h.confirmations[0];
+    h.closeEvent(h.played[0]); var before = h.contentToggles(); dialog.params.buttons[1].onSelect();
+    assert.strictEqual(h.controller(), 'settings_component'); assert.strictEqual(h.contentToggles(), before);
+    dialog.params.onBack(); assert.strictEqual(h.controller(), 'settings_component');
+    h.open(); h.press('enter'); assert.strictEqual(h.played.length, 2);
+    var lines = readPlaybackDiagnosticPages(h);
+    assert.match(lines, /completion-accepted/); assert.match(lines, /recovery-confirm-stale/);
+    assert.doesNotMatch(lines, /recovery-accepted|playback-abandoned/); drainAndroid(h);
+});
+
+test('Android recovery survives destroy/reopen without retaining the destroyed owner', function () {
+    var h = externalRecoveryHarness(); var old = h.screen(); h.press('back'); h.open();
+    if (h.requests.length) h.reply([video()]); allowAndroidRetry(h); h.open(); h.press('enter');
+    var before = h.contentToggles(); old.start(); h.callback(0); h.closeEvent(h.played[0]);
+    assert.strictEqual(h.contentToggles(), before); assert.strictEqual(h.played.length, 2); drainAndroid(h);
+});
+
+test('Android Activity displacement invalidates confirmation even after returning to the same Activity object', function () {
+    var h = externalRecoveryHarness(); var original = h.pushed[0]; h.settingsRecovery();
+    var dialog = h.confirmations[0]; h.foreignActivity(); dialog.params.buttons[1].onSelect(); dialog.params.onBack();
+    assert.strictEqual(h.controller(), 'foreign'); assert.strictEqual(h.played.length, 1);
+    h.activate(original); dialog.params.buttons[1].onSelect();
+    assert.strictEqual(h.played.length, 1); h.press('enter'); assert.strictEqual(h.played.length, 1); drainAndroid(h);
+});
+
+test('Android foreign Modal and Settings are never closed by stale confirmation or callbacks', function () {
+    var h = externalRecoveryHarness(); h.settingsRecovery(); var old = h.confirmations[0];
+    h.Lampa.Modal.open({ buttons: [{ name: 'Foreign', onSelect: function () {} }], onBack: function () {} });
+    var foreign = h.Lampa.Modal.render()[0]; old.params.buttons[1].onSelect(); old.params.onBack();
+    assert.strictEqual(h.Lampa.Modal.render()[0], foreign); assert.strictEqual(h.controller(), 'modal');
+    h.Lampa.Controller.toggle('settings_component'); var count = h.contentToggles();
+    old.params.buttons[1].onSelect(); h.callback(0); h.closeEvent(h.played[0]);
+    assert.strictEqual(h.controller(), 'settings_component'); assert.strictEqual(h.contentToggles(), count); drainAndroid(h);
+});
+
+test('Android permission and video activation use different native keyup dispatches', function () {
+    var h = externalRecoveryHarness();
+    h.Lampa.Controller.toggle('settings_component'); h.keyup(); // keyup -> enter -> Settings trigger -> Modal
+    assert.strictEqual(h.controller(), 'modal'); assert.strictEqual(h.confirmations.length, 1);
+    h.press('down'); h.keyup(); // one Controller.enter, ending back in Settings
+    assert.strictEqual(h.played.length, 1); assert.strictEqual(h.controller(), 'settings_component');
+    h.keyup(); // a queued extra OK can only invoke the Settings action, with no pending
+    assert.strictEqual(h.played.length, 1); assert.match(h.lastNotice().message, /Незавершённого запуска нет/);
+    h.open(); h.keyup(); assert.strictEqual(h.played.length, 2); drainAndroid(h);
+});
+
+test('Android native child Modal leaves its old confirmation cancel-only after returning', function () {
+    var h = externalRecoveryHarness(); h.settingsRecovery(); var old = h.confirmations[0];
+    h.Lampa.Modal.open({ buttons: [{ name: 'Child', onSelect: function () {} }], onBack: function () { h.Lampa.Modal.close(); } });
+    old.params.onBack(); assert.strictEqual(h.confirmations.length, 2);
+    assert.notStrictEqual(h.Lampa.Modal.render()[0], old.node);
+    h.press('back'); assert.strictEqual(h.Lampa.Modal.render()[0], old.node);
+    old.params.buttons[1].onSelect(); assert.strictEqual(h.played.length, 1);
+    h.press('back'); assert.strictEqual(h.controller(), 'settings_component');
+    h.open(); h.press('enter'); assert.strictEqual(h.played.length, 1); drainAndroid(h);
+});
+
+test('Android repeated confirmation opening has fixed listener counts and no Select or Keypad subscriptions', function () {
+    var h = externalRecoveryHarness(); var counts;
+    for (var i = 0; i < 12; i++) {
+        h.settingsRecovery(); if (!counts) counts = h.recoveryHandlers();
+        h.recover(); assert.strictEqual(h.confirmations.length, i + 1);
+        assert.strictEqual(h.recoveryHandlers(), counts); h.press('back');
+    }
+    assert.strictEqual(h.selectObserverCount(), 1); assert.strictEqual(h.keypadBackHandlers(), 0);
+    h.open(); h.press('enter'); assert.strictEqual(h.played.length, 1); drainAndroid(h);
+});
+
+test('Android abandoned events without pending cannot steal Settings or a foreign Activity', function () {
+    var h = externalRecoveryHarness(); allowAndroidRetry(h); var old = h.played[0]; var count = h.contentToggles();
+    h.callback(0); h.closeEvent(old); h.Lampa.Player.listener.send('start', old); h.Lampa.Player.listener.send('external', old);
+    assert.strictEqual(h.controller(), 'settings_component'); assert.strictEqual(h.contentToggles(), count);
+    h.foreignActivity(); h.callback(0); h.closeEvent(old); assert.strictEqual(h.controller(), 'foreign');
+    assert.match(readPlaybackDiagnosticPages(h), /playback-event-rejected/); drainAndroid(h);
+});
+
+test('Android independent native requests retain the accepted residual order p2 then p1', function () {
+    var h = externalRecoveryHarness({ deferredPlayer: true }); h.press('enter');
+    assert.strictEqual(h.played.length, 1); h.beginPlayer(); // API returned; native request p1 still queued
+    allowAndroidRetry(h); h.open(); h.press('enter'); h.press('enter');
+    assert.strictEqual(h.played.length, 2); h.beginPlayer(); assert.strictEqual(h.nativePlayers.length, 2);
+    h.beginNative(1); h.beginNative(0); // execute every independent queued native request
+    assert.deepStrictEqual(h.nativeLaunches, [h.played[1], h.played[0]]);
+    assert.strictEqual(h.nativePlayers.length, 0); assert.strictEqual(h.pendingPlayers.length, 0);
+    h.press('enter'); assert.strictEqual(h.played.length, 2); // external p2 still locked
+});
+
+test('Android recovery fails closed on missing lifecycle APIs, wrong platform and an opening exception', function () {
+    ['lifecycle', 'platform', 'open'].forEach(function (kind) {
+        var h = externalRecoveryHarness();
+        if (kind === 'lifecycle') h.Lampa.Controller.listener = undefined;
+        if (kind === 'platform') h.Lampa.Platform.is = function () { return false; };
+        if (kind === 'open') h.Lampa.Modal.open = function () { throw new Error('unsupported'); };
+        h.settingsRecovery(); assert.strictEqual(h.confirmations.length, 0);
+        assert.ok(h.lastNotice().message); h.open(); h.press('enter');
+        assert.strictEqual(h.played.length, 1); drainAndroid(h);
+    });
+});
+
+test('Android recovery journal contains reasons and attempt IDs without media or credentials', function () {
+    var h = externalRecoveryHarness({ entries: [{ id: 'secret-id', title: 'PRIVATE_TITLE', url: 'http://user:password@media/movie.mp4?token=SECRET' }] });
+    allowAndroidRetry(h); h.callback(0); h.closeEvent(h.played[0]);
+    var lines = readPlaybackDiagnosticPages(h);
+    assert.match(lines, /recovery-request.*\[p1\]/); assert.match(lines, /recovery-accepted.*\[p1\]/);
+    assert.match(lines, /playback-abandoned.*\[p1\]/); assert.match(lines, /completion-rejected/);
+    assert.doesNotMatch(lines, /PRIVATE_TITLE|secret-id|password|SECRET|movie\.mp4|http:\/\//);
+    drainAndroid(h);
+});
+
+
+['before-dom', 'after-dom', 'after-toggle', 'close-toggle', 'callback-toggle', 'activity-toggle', 'close-fullshow', 'callback-fullshow', 'activity-fullshow'].forEach(function (stage) {
+    test('Android partial confirmation exits safely: ' + stage, function () {
+        var h = externalRecoveryHarness(); var fired = false;
+        function interrupt() {
+            if (fired) return; fired = true;
+            if (/^close-/.test(stage)) h.closeEvent(h.played[0]);
+            else if (/^callback-/.test(stage)) h.callback(0);
+            else if (/^activity-/.test(stage)) h.foreignActivity();
+            else throw new Error('partial open');
+        }
+        if (/-toggle$/.test(stage) && stage !== 'after-toggle') {
+            h.Lampa.Controller.listener.follow('toggle', function (e) { if (e.name === 'modal') interrupt(); });
+        } else if (/-fullshow$/.test(stage)) h.Lampa.Modal.listener.follow('fullshow', interrupt);
+        else h.modalHook(function (at) { if (at === stage) interrupt(); });
+        h.settingsRecovery(); h.modalHook(null);
+        var old = h.confirmations[0];
+        assert.strictEqual(h.modalNodes(), 0, 'no orphan DOM');
+        assert.strictEqual(h.modalWindows(), 0, 'no orphan window frame');
+        assert.strictEqual(h.controller(), /^activity-/.test(stage) ? 'foreign' : 'settings_component');
+        if (old) { old.params.onBack(); old.params.buttons[1].onSelect(); old.params.onBack(); }
+        assert.strictEqual(h.modalNodes(), 0); assert.strictEqual(h.modalWindows(), 0);
+        assert.strictEqual(h.played.length, 1);
+        h.open(); h.press('enter');
+        assert.strictEqual(h.played.length, /^(close|callback)-/.test(stage) ? 2 : 1);
+        if (!/^(close|callback)-/.test(stage)) {
+            h.settingsRecovery(); assert.strictEqual(h.Lampa.Modal.opened(), true);
+            h.press('back'); assert.strictEqual(h.controller(), 'settings_component');
+            assert.strictEqual(h.modalNodes(), 0); assert.strictEqual(h.modalWindows(), 0);
+        }
+        drainAndroid(h);
+    });
+});
+
+['during-failure', 'after-failure'].forEach(function (when) {
+    test('Android failed confirmation preserves a foreign child: ' + when, function () {
+        var h = externalRecoveryHarness(); var foreign;
+        function child() {
+            var origin = h.controller();
+            h.Lampa.Modal.open({ buttons: [{ name: 'Foreign', onSelect: function () {} }], onBack: function () {
+                h.Lampa.Modal.close();
+                if (!h.Lampa.Controller.windowTop()) h.Lampa.Controller.toggle(origin);
+            } });
+            foreign = h.Lampa.Modal.render()[0];
+        }
+        h.modalHook(function (stage) {
+            if (stage !== 'after-open') return;
+            h.modalHook(null);
+            if (when === 'during-failure') child();
+            throw new Error('partial open');
+        });
+        h.settingsRecovery(); h.modalHook(null);
+        if (when === 'after-failure') child();
+        var old = h.confirmations[0];
+        old.params.buttons[1].onSelect(); old.params.onBack();
+        assert.strictEqual(h.Lampa.Modal.render()[0], foreign);
+        assert.strictEqual(h.controller(), 'modal'); assert.strictEqual(h.played.length, 1);
+        h.press('back');
+        if (h.modalNodes()) { // Native child close returns to an invalidated parent, which may only close.
+            assert.strictEqual(h.Lampa.Modal.render()[0], old.node);
+            old.params.buttons[1].onSelect(); assert.strictEqual(h.played.length, 1);
+            h.press('back');
+        }
+        assert.strictEqual(h.modalNodes(), 0); assert.strictEqual(h.modalWindows(), 0);
+        assert.strictEqual(h.controller(), 'settings_component');
+        old.params.onBack(); old.params.buttons[1].onSelect();
+        h.open(); h.press('enter'); assert.strictEqual(h.played.length, 1);
+        h.settingsRecovery(); h.press('back');
+        assert.strictEqual(h.modalNodes(), 0); assert.strictEqual(h.modalWindows(), 0);
+        drainAndroid(h);
+    });
+});
+
+function nativeCatalog(options) {
+    var h = componentHarness(Object.assign({ nativeNavigation: true, externalPlayer: true }, options));
+    h.settingsBoot(); h.setting('open_catalog'); h.reply([video(), folder('A')]);
+    return h;
+}
+function assertDlnaSettings(h) {
+    assert.strictEqual(h.Lampa.Activity.active().component, 'main');
+    assert.strictEqual(h.Lampa.Activity.all().length, 1);
+    assert.strictEqual(h.controller(), 'settings_component');
+    assert.strictEqual(h.settingsName(), 'dlna_bridge');
+    assert.strictEqual(h.settingsVisible(), true);
+}
+
+test('native Back from root opens DLNA settings after leaving catalog', function () {
+    var h = nativeCatalog();
+    h.press('back'); assertDlnaSettings(h);
+});
+
+[false, true].forEach(function (pending) {
+    test('native root return preserves ownership, deferred destroy and lock: pending=' + pending, function () {
+        var h = nativeCatalog(); var old = h.screen();
+        if (pending) h.press('enter');
+        var plays = h.played.length;
+        h.press('back'); assertDlnaSettings(h);
+        assert.strictEqual(h.timers.length, 1, 'only native 200ms destroy, no plugin timer');
+        h.timer(); assertDlnaSettings(h);
+        old.start(); old.back(); old.select(0); assertDlnaSettings(h);
+        h.setting('open_catalog'); assert.strictEqual(h.Lampa.Activity.all().length, 2);
+        h.press('enter'); assert.strictEqual(h.played.length, plays + (pending ? 0 : 1));
+        drainAndroid(h);
+    });
+});
+
+test('native nested Back, resource Back and Browse cancellation precede root exit', function () {
+    var h = nativeCatalog();
+    h.press('down'); h.press('enter'); h.reply([folder('B')]);
+    h.press('enter'); h.reply([video()]);
+    h.press('back'); assert.strictEqual(h.title(), 'A');
+    h.press('back'); assert.strictEqual(h.title(), 'DLNA');
+    assert.strictEqual(h.backCount(), 0);
+    h.press('up'); h.press('enter'); h.press('back'); assertDlnaSettings(h); h.timer();
+    h.api.cache['0'] = [{ id: 'multi', title: 'Multi', resources: [
+        { url: 'http://media/one.mp4', mime: 'video/mp4' },
+        { url: 'http://media/two.mp4', mime: 'video/mp4' }
+    ] }, folder('C')];
+    h.setting('open_catalog'); h.press('enter'); assert.strictEqual(h.title(), 'Multi');
+    h.press('back'); assert.strictEqual(h.title(), 'DLNA');
+    var before = h.backCount(); h.press('down'); h.press('enter');
+    var late = h.requests.shift(); h.press('back');
+    assert.strictEqual(h.backCount(), before); assert.strictEqual(h.title(), 'DLNA');
+    late.success(soapResponse(didl([video()]), 1)); assert.strictEqual(h.title(), 'DLNA');
+    h.press('back'); assertDlnaSettings(h); h.timer(); drainAndroid(h);
+});
+
+test('native repeated catalog-settings cycles keep history and subscriptions bounded', function () {
+    var h = nativeCatalog(); var counts = h.recoveryHandlers(); var old = [];
+    for (var i = 0; i < 12; i++) {
+        old.push(h.screen()); h.press('back'); assertDlnaSettings(h); h.timer();
+        old.forEach(function (screen) { screen.start(); screen.back(); });
+        assertDlnaSettings(h); h.setting('open_catalog');
+        assert.strictEqual(h.Lampa.Activity.all().length, 2);
+        assert.strictEqual(h.recoveryHandlers(), counts);
+        assert.strictEqual(h.settings.count('open'), 1);
+        assert.strictEqual(h.windowHandlers(), 4); assert.strictEqual(h.visibilityHandlers(), 2);
+        assert.strictEqual(h.closeHandlers(), 1); assert.strictEqual(h.externalHandlers(), 1);
+    }
+    assert.strictEqual(h.selectObserverCount(), 1); assert.strictEqual(h.keypadBackHandlers(), 0);
+});
+
+test('native settings cancel recovery and allow a separate later video selection', function () {
+    var h = nativeCatalog(); h.press('enter'); h.press('back'); assertDlnaSettings(h); h.timer();
+    h.setting('android_recovery'); assert.strictEqual(h.controller(), 'modal');
+    h.press('back'); assertDlnaSettings(h);
+    h.setting('open_catalog'); h.press('enter'); assert.strictEqual(h.played.length, 1);
+    h.press('back'); assertDlnaSettings(h); h.timer();
+    h.setting('android_recovery'); h.press('down'); h.keyup(); assertDlnaSettings(h);
+    assert.strictEqual(h.played.length, 1, 'permission never plays');
+    h.setting('open_catalog'); assert.strictEqual(h.played.length, 1);
+    h.keyup(); assert.strictEqual(h.played.length, 2); drainAndroid(h);
+});
+
+test('native late old player callbacks cannot dismiss settings or authorize a newer attempt', function () {
+    var h = nativeCatalog(); h.press('enter'); var first = h.played[0];
+    h.press('back'); assertDlnaSettings(h); h.timer();
+    h.setting('android_recovery'); h.press('down'); h.keyup(); assertDlnaSettings(h);
+    h.callback(0); h.closeEvent(first); h.Lampa.Player.listener.send('external', first);
+    assertDlnaSettings(h);
+    h.setting('open_catalog'); h.keyup(); assert.strictEqual(h.played.length, 2);
+    h.press('back'); assertDlnaSettings(h); h.timer();
+    h.callback(0); h.closeEvent(first); h.Lampa.Player.listener.send('start', first);
+    assertDlnaSettings(h);
+    h.setting('open_catalog'); h.keyup(); assert.strictEqual(h.played.length, 2); drainAndroid(h);
+});
+
+['backward', 'activity-start', 'activity-archive', 'settings-open', 'settings-toggle'].forEach(function (stage) {
+    ['activity', 'window'].forEach(function (intruder) {
+        test('native root transition preserves foreign ' + intruder + ' during ' + stage, function () {
+            var h = nativeCatalog(); var old = h.screen(); var fired = false; var foreign;
+            function interrupt() {
+                if (fired) return; fired = true;
+                old.back(); // A repeated stale handler cannot repeat backward().
+                if (intruder === 'activity') {
+                    h.Lampa.Component.add('foreign', function () {
+                        this.create = function () {}; this.render = function () { return h.document.createElement('div'); };
+                        this.start = function () { h.Lampa.Controller.add('foreign', {}); h.Lampa.Controller.toggle('foreign'); };
+                    });
+                    h.Lampa.Activity.push({ component: 'foreign' }); foreign = h.Lampa.Activity.active();
+                } else {
+                    h.Lampa.Modal.open({ buttons: [{ name: 'Foreign', onSelect: function () {} }], onBack: function () {} });
+                    foreign = h.Lampa.Modal.render()[0];
+                }
+            }
+            if (stage === 'backward') h.Lampa.Activity.listener.follow('backward', interrupt);
+            else if (stage.indexOf('activity-') === 0) h.Lampa.Listener.follow('activity', function (e) {
+                if (e.type === stage.substring(9) && e.object.component === 'main') interrupt();
+            });
+            else if (stage === 'settings-open') h.settings.follow('open', function (e) { if (e.name === 'main') interrupt(); });
+            else h.Lampa.Controller.listener.follow('toggle', function (e) { if (e.name === 'settings') interrupt(); });
+            h.press('back'); assert.strictEqual(fired, true);
+            // A backward-listener interruption happens before Lampa pops/starts: Lampa itself
+            // then owns that transition. The plugin must not open settings over its result.
+            assert.strictEqual(h.settingsOpens.filter(function (name) { return name === 'dlna_bridge'; }).length, 1);
+            if (stage !== 'backward') {
+                if (intruder === 'activity') {
+                    assert.strictEqual(h.Lampa.Activity.active(), foreign); assert.strictEqual(h.controller(), 'foreign');
+                } else {
+                    assert.strictEqual(h.Lampa.Modal.render()[0], foreign); assert.strictEqual(h.controller(), 'modal');
+                }
+            }
+            old.back();
+            if (stage === 'backward' && intruder === 'activity') {
+                // Lampa popped the newly pushed foreign Activity, so the catalog never left.
+                // Its next Back is a valid user action after recovery, not a stale callback.
+                assert.strictEqual(h.backCount(), 2); assertDlnaSettings(h);
+            } else assert.strictEqual(h.backCount(), 1);
+        });
+    });
+});
+
+['sole', 'subscriber', 'exception'].forEach(function (scenario) {
+    [false, true].forEach(function (pending) {
+        test('native no-exit Back remains usable: ' + scenario + ', pending=' + pending, function () {
+            var h = nativeCatalog({ backwardThrows: scenario === 'exception' });
+            if (pending) h.press('enter');
+            if (scenario === 'sole') h.Lampa.Activity.all().splice(0, 1);
+            if (scenario === 'subscriber') h.Lampa.Activity.listener.follow('backward', function () {
+                if (h.Lampa.Activity.all().length > 1) h.Lampa.Activity.all().splice(0, 1);
+            });
+            var original = h.Lampa.Activity.active();
+            if (scenario === 'exception') assert.throws(function () { h.press('back'); }, /backward failure/);
+            else h.press('back');
+            assert.strictEqual(h.Lampa.Activity.active(), original);
+            h.press('down'); h.press('enter');
+            assert.strictEqual(h.requests.length, 1, 'folder selection after failed exit works');
+            h.reply([video()]); h.press('back'); assert.strictEqual(h.title(), 'DLNA');
+            h.press('up'); h.press('enter');
+            assert.strictEqual(h.played.length, 1, 'pending lock is preserved; unlocked first selection plays');
+            drainAndroid(h);
+        });
+    });
+});
+
+['main', 'dlna_bridge'].forEach(function (stage) {
+    ['modal', 'select', 'activity'].forEach(function (kind) {
+        test('audit documents native Settings continuation after open ' + stage + ': ' + kind, function () {
+            var h = nativeCatalog(); var fired = false; var node; var foreign; var ok = 0; var back = 0;
+            h.settings.follow('open', function (e) {
+                if (fired || e.name !== stage) return; fired = true;
+                if (kind === 'modal') {
+                    h.Lampa.Modal.open({ buttons: [{ name: 'Foreign', onSelect: function () { ok++; } }], onBack: function () { back++; h.Lampa.Modal.close(); } });
+                    node = h.Lampa.Modal.render()[0];
+                } else if (kind === 'select') {
+                    node = h.Lampa.Select.show({ items: [{}], onSelect: function () { ok++; } });
+                } else {
+                    h.Lampa.Component.add('foreign', function () {
+                        node = h.document.createElement('foreign');
+                        var row = h.document.createElement('button'); row.className = 'selector'; node.appendChild(row);
+                        row.addEventListener('hover:enter', function () { ok++; });
+                        this.create = function () {}; this.render = function () { return node; };
+                        this.start = function () {
+                            h.Lampa.Controller.add('foreign', { back: function () { back++; } });
+                            h.Lampa.Controller.toggle('foreign');
+                            h.Lampa.Controller.collectionSet([node]); h.Lampa.Controller.collectionFocus(row, [node]);
+                        };
+                    });
+                    h.Lampa.Activity.push({ component: 'foreign' }); foreign = h.Lampa.Activity.active();
+                }
+                assert.strictEqual(h.navigation()[0].parentNode, node);
+                assert.strictEqual(h.document.activeElement.parentNode, node);
+            });
+            h.press('back'); assert.strictEqual(fired, true);
+            if (foreign) assert.strictEqual(h.Lampa.Activity.active(), foreign);
+            assert.ok(node.parentNode, 'foreign DOM survives');
+            assert.strictEqual(h.Lampa.Activity.all().length, kind === 'activity' ? 2 : 1);
+            assert.strictEqual(h.modalWindows(), kind === 'activity' ? 0 : 1);
+            assert.notStrictEqual(h.document.activeElement.parentNode, node, 'known defect: settings steals focus');
+            assert.notStrictEqual(h.navigation()[0].parentNode, node, 'known defect: settings steals collection');
+            assert.strictEqual(h.settingsBody().firstChild.tag, stage === 'main' ? 'settings-main' : 'settings-component');
+            assert.strictEqual(h.settingsVisible(), stage === 'main');
+            assert.strictEqual(h.addressState(), 'settings=' + stage);
+            assert.strictEqual(h.controller(), stage === 'main' ? (kind === 'activity' ? 'foreign' : kind) : 'settings_component');
+            // Native continuation, not a second plugin Back: ordinary OK/Back miss the foreign target.
+            h.keyup(); assert.strictEqual(ok, 0);
+            h.press('back'); assert.strictEqual(back, 0);
+            assert.strictEqual(h.modalWindows(), kind === 'activity' ? 0 : 1, 'window remains without its active controller');
+        });
+    });
+});
+
+[false, true].forEach(function (throws) {
+    test('native no-exit recovery does not take focus from a foreign window, throws=' + throws, function () {
+        var h = nativeCatalog({ backwardThrows: throws }); h.press('enter');
+        h.Lampa.Activity.all().splice(0, 1);
+        var ok = 0; var back = 0; var node; var collection; var focused;
+        h.Lampa.Activity.listener.follow('backward', function () {
+            h.Lampa.Modal.open({ buttons: [{ name: 'Foreign', onSelect: function () { ok++; } }], onBack: function () { back++; h.Lampa.Modal.close(); } });
+            node = h.Lampa.Modal.render()[0]; collection = h.navigation(); focused = h.document.activeElement;
+        });
+        if (throws) assert.throws(function () { h.press('back'); }, /backward failure/);
+        else h.press('back');
+        assert.strictEqual(h.controller(), 'modal'); assert.strictEqual(h.settingsVisible(), false);
+        assert.strictEqual(h.document.activeElement, focused); assert.strictEqual(h.navigation(), collection);
+        assert.ok(node.parentNode); assert.strictEqual(h.Lampa.Activity.all().length, 1);
+        h.callback(0); assert.strictEqual(h.controller(), 'modal');
+        h.keyup(); assert.strictEqual(ok, 1); h.press('back'); assert.strictEqual(back, 1);
+        assert.strictEqual(node.parentNode, null); assert.strictEqual(h.modalWindows(), 0);
+        drainAndroid(h);
+    });
+});
+
+test('native no-exit restart respects a window opened synchronously by content toggle', function () {
+    var h = nativeCatalog(); h.Lampa.Activity.all().splice(0, 1);
+    var node; var collection; var focused;
+    h.Lampa.Controller.listener.follow('toggle', function (e) {
+        if (e.name !== 'content' || node) return;
+        h.Lampa.Modal.open({ buttons: [{ name: 'Foreign', onSelect: function () {} }], onBack: function () {} });
+        node = h.Lampa.Modal.render()[0]; collection = h.navigation(); focused = h.document.activeElement;
+    });
+    h.press('back');
+    assert.strictEqual(h.controller(), 'modal'); assert.ok(node.parentNode);
+    assert.strictEqual(h.navigation(), collection); assert.strictEqual(h.document.activeElement, focused);
+    assert.strictEqual(h.Lampa.Activity.all().length, 1); assert.strictEqual(h.modalWindows(), 1);
+});
+
+function returnSample(h, event) {
+    var found = h.api.records.filter(function (record) { return record.event === 'return-' + event; });
+    assert.ok(found.length, event); return found[found.length - 1];
+}
+function observeRoundTrip(h) { h.blurWindow(); h.visibility(true); h.visibility(false); h.focusWindow(); }
+
+['external-first', 'leave-first', 'return-first'].forEach(function (order) {
+    test('return observations preserve lock before permission commit and record ordering: ' + order, function () {
+        var h = nativeCatalog({ deferredPlayer: true }); h.press('enter');
+        var session = h.api.pending(); var controller = h.controller(); var toggles = h.contentToggles();
+        assert.strictEqual(returnSample(h, 'request').observation.external, '0');
+        if (order === 'external-first') h.beginPlayer();
+        h.blurWindow(); h.visibility(true);
+        var departure = returnSample(h, 'visibility');
+        assert.strictEqual(departure.observation.visibility, 'hidden');
+        assert.strictEqual(departure.observation.external, order === 'external-first' ? '1' : '0');
+        if (order === 'leave-first') h.beginPlayer();
+        h.visibility(false); h.focusWindow();
+        var arrival = returnSample(h, 'focus');
+        assert.strictEqual(arrival.observation.documentFocus, '1');
+        assert.strictEqual(arrival.observation.originCatalog, '1'); assert.strictEqual(arrival.observation.originFolder, '1');
+        assert.strictEqual(arrival.observation.content, '1'); assert.strictEqual(arrival.observation.other, '0');
+        assert.strictEqual(arrival.observation.navigationFocus, '1');
+        assert.strictEqual(arrival.observation.hooks, '11111');
+        assert.strictEqual(arrival.observation.external, order === 'return-first' ? '0' : '1');
+        if (order === 'return-first') h.beginPlayer();
+        var external = returnSample(h, 'external-match');
+        assert.ok(order === 'external-first' ? external.n < departure.n : external.n > departure.n);
+        if (order === 'return-first') assert.ok(external.n > arrival.n);
+        for (var i = 0; i < 4; i++) { observeRoundTrip(h); h.Lampa.Player.listener.send('external', h.played[0]); }
+        assert.strictEqual(h.api.pending(), session); assert.strictEqual(session.phase, 'external');
+        assert.strictEqual(h.controller(), controller); assert.strictEqual(h.contentToggles(), toggles);
+        h.keyup(); assert.strictEqual(h.played.length, 1); assert.strictEqual(h.nativePlayers.length, 1);
+        assert.doesNotMatch(readPlaybackDiagnosticPages(h), /recovery-accepted|completion-accepted|pending-cleared|playback-abandoned/);
+        drainAndroid(h); assert.strictEqual(h.nativeLaunches.length, 1);
+    });
+});
+
+test('return observations do not invent a departure and do not unblock create.abort', function () {
+    var h = nativeCatalog(); h.press('enter'); h.focusWindow(); h.visibility(false);
+    assert.strictEqual(h.api.pending().phase, 'external');
+    assert.strictEqual(h.api.records.some(function (r) { return r.observation && r.observation.visibility === 'hidden'; }), false);
+    h.keyup(); assert.strictEqual(h.played.length, 1); drainAndroid(h);
+    var a = nativeCatalog({ preCreateAbort: true }); a.press('enter'); var pending = a.api.pending();
+    observeRoundTrip(a); a.keyup();
+    assert.strictEqual(a.api.pending(), pending); assert.strictEqual(pending.phase, 'launching');
+    assert.strictEqual(returnSample(a, 'focus').observation.external, '0');
+    assert.strictEqual(a.played.length, 1); assert.strictEqual(a.launches.length, 0);
+});
+
+test('return diagnostics preserve internal Player completion behavior', function () {
+    var h = nativeCatalog({ externalPlayer: false }); h.press('enter'); var pending = h.api.pending();
+    observeRoundTrip(h);
+    assert.strictEqual(h.api.pending(), pending); assert.strictEqual(h.controller(), 'player');
+    assert.strictEqual(returnSample(h, 'focus').observation.external, '0');
+    h.closePlayer(); assert.strictEqual(h.api.pending(), null); assert.strictEqual(h.controller(), 'content');
+});
+
+test('return generations identify parent folder restoration without exposing folder IDs', function () {
+    var h = nativeCatalog(); h.press('enter'); var origin = returnSample(h, 'request').observation;
+    h.screen().refresh(); if (h.requests.length) h.reply([video(), folder('A')]); h.focusWindow();
+    assert.strictEqual(returnSample(h, 'focus').observation.folder, origin.folder);
+    h.press('down'); h.press('enter'); h.reply([folder('PRIVATE_FOLDER_ID')]); h.focusWindow();
+    var child = returnSample(h, 'focus').observation;
+    assert.strictEqual(child.catalog, origin.catalog); assert.notStrictEqual(child.folder, origin.folder);
+    assert.strictEqual(child.originFolder, '0'); h.press('back'); h.focusWindow();
+    assert.strictEqual(returnSample(h, 'focus').observation.originFolder, '1');
+    h.press('up'); h.keyup(); assert.strictEqual(h.played.length, 1); drainAndroid(h);
+});
+
+test('return observers keep only scalar context across destruction and reopening', function () {
+    var h = nativeCatalog(); h.press('enter'); var pending = h.api.pending();
+    var origin = returnSample(h, 'request').observation;
+    var counts = h.recoveryHandlers(); h.press('back'); assertDlnaSettings(h); h.timer();
+    assert.strictEqual(pending.restoreOwner, null); observeRoundTrip(h);
+    assert.strictEqual(returnSample(h, 'focus').observation.originCatalog, '0');
+    assert.strictEqual(returnSample(h, 'focus').observation.catalog, 0);
+    h.setting('open_catalog'); h.focusWindow();
+    assert.notStrictEqual(returnSample(h, 'focus').observation.catalog, origin.catalog);
+    assert.strictEqual(returnSample(h, 'focus').observation.originCatalog, '0');
+    assert.strictEqual(h.api.pending(), pending); h.keyup(); assert.strictEqual(h.played.length, 1);
+    for (var i = 0; i < 8; i++) { h.press('back'); h.timer(); h.setting('open_catalog'); }
+    assert.strictEqual(h.recoveryHandlers(), counts); assert.strictEqual(h.windowHandlers(), 4); assert.strictEqual(h.visibilityHandlers(), 2);
+    [h.api.observation()].concat(h.api.records.map(function (r) { return r.observation; }).filter(Boolean)).forEach(function (snapshot) {
+        Object.keys(snapshot).forEach(function (key) { assert.ok(['string', 'number', 'boolean'].indexOf(typeof snapshot[key]) >= 0); });
+    });
+    drainAndroid(h);
+});
+
+test('manual recovery and old player events remain unchanged with return observations', function () {
+    var h = nativeCatalog(); h.press('enter'); var first = h.played[0]; h.focusWindow();
+    h.press('back'); h.timer(); h.setting('android_recovery'); h.press('back'); assertDlnaSettings(h);
+    h.setting('open_catalog'); h.keyup(); assert.strictEqual(h.played.length, 1);
+    h.press('back'); h.timer(); h.setting('android_recovery'); h.press('down'); h.keyup(); assertDlnaSettings(h);
+    assert.strictEqual(h.api.pending(), null); assert.strictEqual(h.api.observation(), null); assert.strictEqual(h.played.length, 1);
+    h.setting('open_catalog'); h.keyup(); var second = h.api.pending();
+    h.callback(0); h.closeEvent(first); h.Lampa.Player.listener.send('start', first); h.Lampa.Player.listener.send('external', first);
+    observeRoundTrip(h); assert.strictEqual(h.api.pending(), second); h.keyup(); assert.strictEqual(h.played.length, 2);
+    drainAndroid(h); assert.strictEqual(h.nativeLaunches.length, 2);
+});
+
+['normal', 'missing', 'throwing'].forEach(function (mode) {
+    test('document focus is independent of Lampa navigation focus: ' + mode, function () {
+        var h = nativeCatalog({ noDocumentFocus: mode === 'missing', throwDocumentFocus: mode === 'throwing' });
+        h.press('enter'); h.blurWindow(); var sample = returnSample(h, 'blur').observation;
+        assert.strictEqual(sample.documentFocus, mode === 'normal' ? '0' : '?');
+        assert.strictEqual(sample.navigationFocus, '1'); assert.strictEqual(sample.content, '1');
+        h.keyup(); assert.strictEqual(h.played.length, 1); drainAndroid(h);
+    });
+});
+
+test('return samples report loading, error, resources and a partially opened foreign Modal', function () {
+    var h = componentHarness({ nativeNavigation: true }); h.open(); h.focusWindow();
+    assert.strictEqual(returnSample(h, 'focus').observation.loading, '1');
+    for (var i = 0; i < 3; i++) { h.fail(); if (i < 2) h.timer(); }
+    h.focusWindow(); assert.strictEqual(returnSample(h, 'focus').observation.error, '1');
+    var a = nativeCatalog(); a.api.cache['0'] = [{ id: 'multi', title: 'Multi', resources: [
+        { url: 'http://media/a', mime: 'video/mp4' }, { url: 'http://media/b', mime: 'video/mp4' }
+    ] }];
+    a.press('back'); a.timer(); a.setting('open_catalog'); a.press('enter'); a.focusWindow();
+    assert.strictEqual(returnSample(a, 'focus').observation.resources, '1');
+    a.modalHook(function (stage) { if (stage === 'after-dom') a.focusWindow(); });
+    a.Lampa.Modal.open({ buttons: [{ name: 'Foreign', onSelect: function () {} }], onBack: function () {} });
+    var partial = returnSample(a, 'focus').observation;
+    assert.strictEqual(partial.content, '1'); assert.strictEqual(partial.other, '1');
+});
+
+test('return records and pages contain no media, credentials or object IDs', function () {
+    var h = componentHarness({ nativeNavigation: true, externalPlayer: true });
+    h.open(); h.reply([{ id: 'PRIVATE_OBJECT_ID', title: 'PRIVATE_TITLE', url: 'http://user:password@media/private.mp4?token=SECRET' }]);
+    h.press('enter'); observeRoundTrip(h); h.press('back'); h.timer();
+    var text = JSON.stringify(h.api.records) + readPlaybackDiagnosticPages(h);
+    assert.doesNotMatch(text, /PRIVATE_OBJECT_ID|PRIVATE_TITLE|password|SECRET|private\.mp4|http:\/\//);
+    assert.match(text, /pending-context-not-causation/); assert.ok(h.api.records.length <= 100);
+    drainAndroid(h);
+});
+
+function queuedReturn(h) {
+    ['blur', 'hidden', 'visible', 'focus'].forEach(function (type) { h.queueReturn(type); });
+    while (h.returnEvents.length) h.nextReturn();
+    h.flushReturnTasks();
+}
+function queuedOK(h) {
+    h.queueInput('keydown'); h.queueInput('keyup');
+    while (h.inputEvents.length) h.nextInput();
+}
+function drainReturnModel(h) {
+    while (h.pendingPlayers.length || h.returnEvents.length || h.inputEvents.length || h.returnTasks.length || h.nativePlayers.length || h.timers.length) {
+        while (h.pendingPlayers.length) h.beginPlayer();
+        while (h.returnEvents.length) h.nextReturn();
+        while (h.inputEvents.length) h.nextInput();
+        h.flushReturnTasks();
+        while (h.nativePlayers.length) h.beginNative();
+        while (h.timers.length) h.timer();
+    }
+}
+
+['external-hidden', 'hidden-external', 'Home-return'].forEach(function (order) {
+    test('automatic permission is one-shot, unconfirmed and needs fresh input: ' + order, function () {
+        var h = nativeCatalog({ deferredPlayer: true }); h.press('enter'); var first = h.api.pending();
+        if (order !== 'hidden-external') h.beginPlayer();
+        h.queueReturn('blur'); h.queueReturn('hidden'); h.nextReturn(); h.nextReturn();
+        if (order === 'hidden-external') h.beginPlayer();
+        h.queueReturn('visible'); h.queueReturn('focus'); h.nextReturn(); h.nextReturn();
+        assert.strictEqual(h.api.pending(), first, 'no permission inside event dispatch');
+        h.flushReturnTasks();
+        assert.strictEqual(h.api.pending(), null); assert.strictEqual(first.phase, 'abandoned'); assert.strictEqual(first.restoreOwner, null);
+        assert.strictEqual(h.controller(), 'content'); assert.strictEqual(h.played.length, 1);
+        queuedReturn(h); h.Lampa.Player.listener.send('external', first.data); h.flushReturnTasks();
+        var accepted = h.api.records.filter(function (r) { return r.event === 'recovery-auto-accepted'; });
+        assert.strictEqual(accepted.length, 1); assert.strictEqual(accepted[0].reason, 'auto-return-unconfirmed');
+        assert.strictEqual(h.api.records.some(function (r) { return r.event === 'completion-accepted' || r.phase === 'finished'; }), false);
+        h.queueInput('keyup'); h.nextInput(); assert.strictEqual(h.played.length, 1);
+        h.queueInput('keydown', true); h.queueInput('keyup'); h.nextInput(); h.nextInput(); assert.strictEqual(h.played.length, 1);
+        queuedOK(h); assert.strictEqual(h.played.length, 2);
+        assert.strictEqual(h.played[0].url, h.played[1].url); assert.notStrictEqual(h.played[0], h.played[1]);
+        drainReturnModel(h); assert.strictEqual(h.nativeLaunches.length, 2);
+    });
+});
+
+test('visible before external requires a fresh complete cycle', function () {
+    var h = nativeCatalog({ deferredPlayer: true }); h.press('enter'); var first = h.api.pending();
+    queuedReturn(h); h.beginPlayer(); h.focusWindow(); h.flushReturnTasks();
+    assert.strictEqual(h.api.pending(), first); assert.strictEqual(h.played.length, 1);
+    queuedReturn(h); assert.strictEqual(h.api.pending(), null); drainReturnModel(h);
+});
+
+test('focus, component start and reopen without hidden cannot authorize; manual recovery remains', function () {
+    var h = nativeCatalog(); h.press('enter'); var first = h.api.pending();
+    h.blurWindow(); h.focusWindow(); h.resumed(); h.open(); h.flushReturnTasks();
+    assert.strictEqual(h.api.pending(), first);
+    h.press('back'); h.timer(); h.setting('android_recovery'); h.press('back'); assertDlnaSettings(h);
+    assert.strictEqual(h.api.pending(), first);
+    h.setting('android_recovery'); h.press('down'); h.keyup(); assert.strictEqual(h.api.pending(), null);
+    assert.strictEqual(h.played.length, 1); h.setting('open_catalog'); h.keyup(); assert.strictEqual(h.played.length, 2);
+    drainReturnModel(h);
+});
+
+test('folder change discards the old cycle even after returning to the origin', function () {
+    var h = nativeCatalog(); h.press('enter'); var first = h.api.pending(); h.visibility(true);
+    h.press('down'); h.press('enter'); h.reply([video()]); h.press('back');
+    h.visibility(false); h.focusWindow(); h.flushReturnTasks(); assert.strictEqual(h.api.pending(), first);
+    queuedReturn(h); assert.strictEqual(h.api.pending(), null); drainReturnModel(h);
+});
+
+test('Activity displacement invalidates the cycle without losing manual lock', function () {
+    var h = nativeCatalog(); h.press('enter'); var first = h.api.pending(); h.visibility(true);
+    h.Lampa.Component.add('other', function () { this.create = function () {}; this.render = function () { return h.document.createElement('div'); }; this.start = function () {}; this.destroy = function () {}; });
+    h.Lampa.Activity.push({ component: 'other' }); h.press('back');
+    h.visibility(false); h.focusWindow(); h.flushReturnTasks(); assert.strictEqual(h.api.pending(), first);
+    queuedReturn(h); assert.strictEqual(h.api.pending(), null); drainReturnModel(h);
+});
+
+test('destroyed origin and a new catalog cannot reuse an old return cycle', function () {
+    var h = nativeCatalog(); h.press('enter'); var first = h.api.pending(); h.visibility(true);
+    h.press('back'); h.timer(); h.setting('open_catalog'); h.visibility(false); h.focusWindow(); h.flushReturnTasks();
+    queuedReturn(h); assert.strictEqual(h.api.pending(), first); assert.strictEqual(first.restoreOwner, h.screen());
+    assert.strictEqual(h.played.length, 1); drainReturnModel(h);
+});
+
+['settings', 'modal', 'select', 'partial-modal', 'after-visibility'].forEach(function (cover) {
+    test('temporary cover discards cycle and never steals UI: ' + cover, function () {
+        var h = nativeCatalog(); h.press('enter'); var first = h.api.pending(); h.visibility(true);
+        function modal() { h.Lampa.Modal.open({ buttons: [{ name: 'Foreign', onSelect: function () {} }], onBack: function () { h.Lampa.Modal.close(); } }); }
+        if (cover === 'settings') h.settingsBoot();
+        else if (cover === 'select') h.Lampa.Select.show({ items: [{}], onSelect: function () {} });
+        else if (cover === 'partial-modal') {
+            h.modalHook(function (stage) { if (stage === 'after-dom') { h.visibility(false); h.focusWindow(); h.flushReturnTasks(); assert.strictEqual(h.api.pending(), first); } }); modal(); h.modalHook(null);
+        } else if (cover === 'after-visibility') { h.Lampa.Controller.listener.follow('toggle', function () {}); h.visibility(false); modal(); }
+        else modal();
+        var controller = h.controller(); var focused = h.document.activeElement; var collection = h.navigation();
+        h.visibility(false); h.focusWindow(); h.flushReturnTasks();
+        assert.strictEqual(h.api.pending(), first); assert.strictEqual(h.controller(), controller);
+        assert.strictEqual(h.document.activeElement, focused); assert.strictEqual(h.navigation(), collection);
+        if (cover !== 'settings') h.press('back');
+        h.open(); h.focusWindow(); h.flushReturnTasks(); assert.strictEqual(h.api.pending(), first, 'closing cover alone never authorizes');
+        drainReturnModel(h);
+    });
+});
+
+test('loading, error and resources are not eligible return targets', function () {
+    var h = nativeCatalog(); h.press('enter'); var first = h.api.pending(); h.visibility(true);
+    h.press('down'); h.press('enter'); h.visibility(false); h.focusWindow(); h.flushReturnTasks();
+    assert.strictEqual(h.api.pending(), first); h.reply([video()]); h.flushReturnTasks(); assert.strictEqual(h.api.pending(), first);
+    h.press('back');
+    h.api.cache['0'] = [{ id: 'r', title: 'Resources', resources: [{ url: 'http://media/a' }, { url: 'http://media/b' }] }];
+    h.screen().refresh(); if (h.requests.length) h.reply([]); h.press('enter'); queuedReturn(h);
+    assert.strictEqual(h.api.pending(), first); drainReturnModel(h);
+});
+
+[false, true].forEach(function (abort) {
+    test('internal start and abort without matching external never open bypass: abort=' + abort, function () {
+        var h = nativeCatalog({ externalPlayer: false, preCreateAbort: abort }); h.press('enter'); var first = h.api.pending();
+        queuedReturn(h); assert.strictEqual(h.api.pending(), first);
+        h.Lampa.Player.listener.send('external', { url: h.played[0].url }); queuedReturn(h);
+        assert.strictEqual(h.api.pending(), first); assert.strictEqual(h.played.length, 1); drainReturnModel(h);
+    });
+});
+
+test('late old callback/close/start/external cannot change a newer same-URL attempt', function () {
+    var h = nativeCatalog(); h.press('enter'); var old = h.played[0]; queuedReturn(h); queuedOK(h);
+    var current = h.api.pending(); assert.ok(current); var before = h.contentToggles();
+    h.callback(0); h.closeEvent(old); h.Lampa.Player.listener.send('start', old); h.Lampa.Player.listener.send('external', old);
+    h.flushReturnTasks(); assert.strictEqual(h.api.pending(), current); assert.strictEqual(current.internalStarted, undefined);
+    assert.strictEqual(h.contentToggles(), before); assert.strictEqual(h.played.length, 2); drainReturnModel(h);
+});
+
+['failDiagnosticWrites', 'failDiagnosticRegistration'].forEach(function (failure) {
+    test('functional return does not depend on diagnostics: ' + failure, function () {
+        var options = {}; options[failure] = true; var h = nativeCatalog(options); h.press('enter');
+        queuedReturn(h); assert.strictEqual(h.api.pending(), null); queuedOK(h); assert.strictEqual(h.played.length, 2);
+        drainReturnModel(h);
+    });
+});
+
+test('held OK requires release and a new press after automatic permission', function () {
+    var h = nativeCatalog(); h.press('enter'); h.queueInput('keydown'); h.nextInput();
+    queuedReturn(h); assert.strictEqual(h.api.pending(), null);
+    h.queueInput('keydown', true); h.queueInput('keyup'); h.nextInput(); h.nextInput();
+    assert.strictEqual(h.played.length, 1); queuedOK(h); assert.strictEqual(h.played.length, 2); drainReturnModel(h);
+});
+
+test('independent native queue retains executable p2 then p1 residual order', function () {
+    var h = nativeCatalog({ deferredPlayer: true }); h.press('enter'); h.beginPlayer(); var first = h.played[0];
+    queuedReturn(h); queuedOK(h); h.beginPlayer(); var second = h.played[1];
+    assert.strictEqual(h.nativePlayers.length, 2); h.beginNative(1); h.beginNative(0);
+    assert.deepStrictEqual(h.nativeLaunches, [second, first]); assert.strictEqual(h.api.pending().data, second);
+    drainReturnModel(h); assert.strictEqual(h.nativePlayers.length, 0); assert.strictEqual(h.pendingPlayers.length, 0);
+});
+
+test('an error in the origin folder blocks automatic permission', function () {
+    var h = nativeCatalog(); h.press('enter'); var first = h.api.pending();
+    h.visibility(true); delete h.api.cache['0']; h.screen().refresh();
+    for (var i = 0; i < 3; i++) { h.fail(); if (i < 2) h.timer(); }
+    assert.strictEqual(h.screen().playbackContext().error, true); h.visibility(false); h.focusWindow(); h.flushReturnTasks();
+    assert.strictEqual(h.api.pending(), first); drainReturnModel(h);
+});
+
+test('new pointer gesture is required; an old click alone cannot launch', function () {
+    var h = nativeCatalog(); h.press('enter'); queuedReturn(h);
+    h.click(h.rows()[0]); assert.strictEqual(h.played.length, 1);
+    h.pointerDown(h.rows()[0]); h.click(h.rows()[0]); assert.strictEqual(h.played.length, 2);
+    drainReturnModel(h);
+});
+
+test('a fresh press interrupted by blur cannot turn into a residual launch', function () {
+    var h = nativeCatalog(); h.press('enter'); queuedReturn(h);
+    h.queueInput('keydown'); h.nextInput(); h.blurWindow(); h.focusWindow(); h.flushReturnTasks();
+    h.queueInput('keyup'); h.nextInput(); assert.strictEqual(h.played.length, 1);
+    queuedOK(h); assert.strictEqual(h.played.length, 2); drainReturnModel(h);
+});
+
+test('automatic cycles keep fixed subscriptions and scalar state only', function () {
+    var h = nativeCatalog(); var counts;
+    function countsNow() { return [h.recoveryHandlers(), h.windowHandlers(), h.visibilityHandlers(), h.selectObserverCount(),
+        h.Lampa.Keypad.listener.count('keydown'), h.Lampa.Keypad.listener.count('keyup'), h.startHandlers()].join(':'); }
+    counts = countsNow(); h.press('enter');
+    for (var i = 0; i < 10; i++) {
+        var session = h.api.pending();
+        Object.keys(h.api.autoReturn()).forEach(function (key) { assert.ok(['number', 'string', 'boolean'].indexOf(typeof h.api.autoReturn()[key]) >= 0); });
+        queuedReturn(h); assert.strictEqual(session.restoreOwner, null); assert.strictEqual(h.api.autoReturn(), null);
+        assert.strictEqual(countsNow(), counts);
+        if (i < 9) queuedOK(h);
+    }
+    assert.strictEqual(h.played.length, 10); drainReturnModel(h); assert.strictEqual(h.nativeLaunches.length, 10);
+    assert.ok(h.api.records.length <= 100);
+});
+
+test('internal Player classification survives failed diagnostic registration', function () {
+    var h = nativeCatalog({ externalPlayer: false, failDiagnosticRegistration: true }); h.press('enter');
+    var first = h.api.pending(); assert.strictEqual(first.internalStarted, true);
+    queuedReturn(h); h.Lampa.Player.listener.send('external', first.data); queuedReturn(h);
+    assert.strictEqual(h.api.pending(), first); h.closePlayer(); assert.strictEqual(h.api.pending(), null); drainReturnModel(h);
+});
+
+['OK', 'pointer'].forEach(function (input) {
+    test('automatic permission permits fresh multi-resource selection via ' + input, function () {
+        var h = nativeCatalog();
+        h.api.cache['0'].push({ title: 'Multi', resources: [
+            { url: 'http://media/one.mp4', mime: 'video/mp4' },
+            { url: 'http://media/two.mp4', mime: 'video/mp4' }
+        ] });
+        // Refresh from the cache before launching the original attempt.
+        h.screen().refresh(); h.press('enter'); queuedReturn(h);
+        assert.strictEqual(h.api.pending(), null); assert.strictEqual(h.played.length, 1);
+        h.press('down'); h.press('down'); queuedOK(h);
+        assert.strictEqual(h.title(), 'Multi'); assert.strictEqual(h.played.length, 1);
+        // Neither an orphan release, a repeat, nor a click without a new press is input permission.
+        h.queueInput('keyup'); h.nextInput();
+        h.queueInput('keydown', true); h.queueInput('keyup'); h.nextInput(); h.nextInput();
+        h.click(h.rows()[0]); assert.strictEqual(h.played.length, 1);
+        h.press('back'); assert.strictEqual(h.title(), 'DLNA');
+        queuedOK(h); assert.strictEqual(h.title(), 'Multi');
+        h.press('down'); h.press('up'); h.press('down');
+        if (input === 'OK') queuedOK(h);
+        else { h.pointerDown(h.rows()[1]); h.click(h.rows()[1]); }
+        assert.strictEqual(h.played.length, 2);
+        assert.strictEqual(h.played[1].url, 'http://media/two.mp4');
+        h.press('back'); assert.strictEqual(h.title(), 'DLNA');
+        h.press('back'); assertDlnaSettings(h); h.timer();
+        h.setting('open_catalog');
+        assert.strictEqual(h.title(), 'DLNA');
+        h.press('down'); h.press('down');
+        queuedOK(h); assert.strictEqual(h.title(), 'Multi');
+        queuedOK(h); assert.strictEqual(h.played.length, 2); // The new pending attempt still locks playback.
+        h.press('back'); assert.strictEqual(h.title(), 'DLNA');
+        drainReturnModel(h);
+    });
 });
