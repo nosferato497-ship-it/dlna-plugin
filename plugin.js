@@ -2419,8 +2419,11 @@
                         }
                     }
                 }
+                // Main.start delegates content to items_line in the Android web build.
+                var returnedController = controllerName();
                 if (!previous || Lampa.Activity.active() !== previous ||
-                    controllerName() !== 'content' || typeof Lampa.Controller.windowTop !== 'function' ||
+                    (returnedController !== 'content' && !(previous.component === 'main' && returnedController === 'items_line')) ||
+                    typeof Lampa.Controller.windowTop !== 'function' ||
                     Lampa.Controller.windowTop() || !Lampa.Settings || typeof Lampa.Settings.create !== 'function') return;
                 Lampa.Controller.toggle('settings');
                 // Settings open/toggle listeners may synchronously navigate or open another window.

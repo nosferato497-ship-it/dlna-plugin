@@ -366,7 +366,10 @@ function componentHarness(options) {
         globalListener.send('activity', { type: 'start', object: activity });
     }
     if (options.nativeNavigation) {
-        active = { component: 'main', activity: { component: {} } };
+        active = { component: 'main', activity: { component: { start: function () {
+            // Observed in MEmu: main.start delegates content to its items_line controller.
+            if (options.mainItemsLine) { Lampa.Controller.add('items_line', {}); Lampa.Controller.toggle('items_line'); }
+        } } } };
         activityStack.push(active);
         settingsBody = element('settings-body'); document.body.appendChild(settingsBody);
         settingsMain = element('settings-main');
@@ -2330,4 +2333,16 @@ test('internal Player classification survives failed diagnostic registration', f
         h.press('back'); assert.strictEqual(h.title(), 'DLNA');
         drainReturnModel(h);
     });
+});
+
+
+test('MEmu main items_line controller permits root Back after nested focus restoration', function () {
+    var h = nativeCatalog({ mainItemsLine: true });
+    h.press('down'); h.press('enter'); h.reply([folder('B')]);
+    assert.strictEqual(h.title(), 'A');
+    h.press('back'); assert.strictEqual(h.title(), 'DLNA');
+    assert.strictEqual(h.document.activeElement, h.rows()[1]);
+    assert.strictEqual(h.controller(), 'content');
+    h.press('back'); assertDlnaSettings(h);
+    h.timer(); assertDlnaSettings(h);
 });
