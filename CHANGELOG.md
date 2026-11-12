@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.6 — исправление Android Back (2026-11-12)
+
+Back из корня открывает настройки DLNA Bridge, включая случай активации `items_line` главной Activity. Сохранён возврат из папки с восстановлением фокуса. Исходное исправление проверено в MEmu и на Xiaomi; установка маркированной копии напрямую с Pages ожидает проверки.
+
 ## 0.5.5 — Restore DLNA settings focus after playback
 
 - Restore the controller that opened the Select after folder selection and Back, so folder navigation keeps its Lampa context.
