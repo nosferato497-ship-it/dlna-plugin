@@ -8,7 +8,11 @@
 
 | Версия | Ссылка | Статус |
 |---|---|---|
-| **0.6.5** | `https://nosferato497-ship-it.github.io/dlna-plugin/v065/plugin.js` | последняя тестовая, ожидает ручного испытания Xiaomi |
+| **1.0.2-rc.1** | `https://nosferato497-ship-it.github.io/dlna-plugin/v102-rc1/plugin.js` | кандидат для Lampa Android TV, приёмка ожидается |
+| **0.6.8** | `https://nosferato497-ship-it.github.io/dlna-plugin/v068/plugin.js` | MEmu и обязательная приёмка Xiaomi пройдены |
+| 0.6.7 | `https://nosferato497-ship-it.github.io/dlna-plugin/v067/plugin.js` | MEmu и обязательная приёмка Xiaomi пройдены |
+| 0.6.6 | `https://nosferato497-ship-it.github.io/dlna-plugin/v066/plugin.js` | предыдущая тестовая |
+| 0.6.5 | `https://nosferato497-ship-it.github.io/dlna-plugin/v065/plugin.js` | историческая тестовая сборка |
 | 0.6.4 | `https://nosferato497-ship-it.github.io/dlna-plugin/v064/plugin.js` | диагностическая |
 | 0.6.3 | `https://nosferato497-ship-it.github.io/dlna-plugin/v063/plugin.js` | ограниченное ручное испытание Xiaomi |
 | 0.6.2 | `https://nosferato497-ship-it.github.io/dlna-plugin/v062/plugin.js` | предыдущая тестовая |
@@ -24,9 +28,30 @@
 
 После установки открыть раздел настроек **DLNA Bridge &lt;версия&gt;**, указать адрес DLNA-сервера (по умолчанию `http://192.168.1.1:8200`) и выбрать «Открыть каталог DLNA».
 
-## Текущий статус 0.6.5
+## Кандидат 1.0.2-rc.1
 
-**Последняя опубликованная тестовая версия — 0.6.5. Ручное испытание этой версии на Xiaomi ожидается.**
+Локальный плеер Lampa выбран по умолчанию. Сохранены ручное подключение к MediaServer, список серверов, SOAP Browse, навигация и Android Recovery. Внешний Renderer и ручной SSDP доступны как дополнительные функции. Для SSDP нужен доступный UDP API.
+
+Кандидат прошёл 458 автотестов и проверку синтаксиса ES5. Приёмка в MEmu и на физическом Xiaomi Mi Box S 4K с пультом ожидается.
+
+[Исходники кандидата](https://github.com/nosferato497-ship-it/dlna-plugin/tree/d25f3052047b02f6dbac7892a64d2c25183ca514) | [Протокол приёмки](https://github.com/nosferato497-ship-it/dlna-plugin/blob/d25f3052047b02f6dbac7892a64d2c25183ca514/docs/manual-test-1.0.2-rc.md).
+
+## Архив этапов 0.7.0–1.0.2
+
+Эти исходники фиксируют этапы разработки. Для испытания на Android TV используйте кандидат из таблицы установки.
+
+| Версия | Исходник | Изменения |
+|---|---|---|
+| 0.7.0 | [v070/plugin.js](v070/plugin.js) | исправление синтаксиса исходной 0.6.0, проверка AVTransport |
+| 0.8.0 | [v080/plugin.js](v080/plugin.js) | SSDP через доступный UDP API |
+| 0.9.0 | [v090/plugin.js](v090/plugin.js) | реестр Renderer и выбор активного устройства |
+| 1.0.0 | [v100/plugin.js](v100/plugin.js) | воспроизведение на Renderer, опрос и управление |
+| 1.0.1 | [v101/plugin.js](v101/plugin.js) | переработка сессии Renderer; запуск прерывается из-за необъявленного initialGuard |
+| 1.0.2 | [v102/plugin.js](v102/plugin.js) | исправление запуска, общий GUARD и восстановление Renderer по выбранному режиму |
+
+[Сравнение исходников](https://github.com/nosferato497-ship-it/dlna-plugin/blob/d25f3052047b02f6dbac7892a64d2c25183ca514/docs/source-audit-1.0.2.md).
+
+## Исторический статус 0.6.5
 
 В линии 0.6.x реализованы каталог как Activity Lampa, Back из корня в настройки DLNA Bridge, переход в родительскую папку и возврат из ресурсов к списку файлов. Android recovery требует подтверждения и отдельного последующего выбора видео.
 
@@ -75,14 +100,14 @@
 | Диагностический каркас Lampa, ручная проверка device description | ✅ | 0.3.0–0.3.1 |
 | Перечень методов AndroidJS (только чтение, без вызова методов) | ✅ | 0.5.6–0.5.7 |
 | Сетевой доступ к локальному HTTP из WebView (`Lampa.Reguest.native()`) | ✅ | 0.5.8 |
-| Ручное подключение к MediaServer и ContentDirectory Browse | ✅ | 0.5.4–0.6.5 |
-| Парсер UPnP device/service description, определение endpoint | ◐ DIDL-Lite есть, description — нет | — |
-| Проверка Renderer и AVTransport SOAP | ☐ | — |
-| SSDP discovery — только при наличии UDP/native API | ☐ API не найден | — |
-| Передача воспроизведения на Renderer и управление | ☐ | — |
+| Ручное подключение к MediaServer и ContentDirectory Browse | ✅ | 0.5.4–0.6.8, 1.0.2-rc.1 |
+| Парсер UPnP device/service description, определение endpoint | Реализовано в кандидате | 1.0.2-rc.1 |
+| Проверка Renderer и AVTransport SOAP | Реализовано в кандидате | 0.7.0, 1.0.2-rc.1 |
+| SSDP discovery — только при наличии UDP/native API | Реализовано для поддерживаемых API, Android TV ожидает проверки | 0.8.0, 1.0.2-rc.1 |
+| Передача воспроизведения на Renderer и управление | Реализовано в кандидате, проверка на устройстве ожидается | 1.0.0, 1.0.2-rc.1 |
 | Выбор дорожек и субтитров на конкретных Renderer | ☐ | — |
 
-Итог: сценарий **MediaServer** реализован, ручные результаты относятся к конкретным версиям, указанным в разделах проверки. Испытание 0.6.5 ожидается. Сценарий **MediaRenderer** ещё не начат.
+Основной сценарий — локальное воспроизведение из MediaServer в Lampa. Проверка внешнего Renderer зависит от поддержки AVTransport на устройстве.
 
 ## Проверка на устройствах
 
@@ -117,14 +142,11 @@
 
 ## Пока не реализовано
 
-- SSDP/UDP multicast discovery;
-- автоматический разбор UPnP device/service description и определение endpoint;
-- управление AVTransport и отправка URL на Renderer;
 - переключение аудиодорожек и субтитров.
 
-## Почему без автоматического поиска
+## Когда доступен SSDP
 
-Обычный JavaScript в WebView не предоставляет UDP multicast API, а наличие объекта `AndroidJS` не означает, что приложение экспортирует сетевой API для SSDP. Документированный API для этого пока не найден (его наличие проверяет диагностика 0.5.6–0.5.7), поэтому сервер задаётся адресом вручную. Локальные HTTP-запросы также могут ограничиваться CORS, mixed content и настройками приложения.
+Обычный JavaScript в WebView не предоставляет UDP multicast API, а наличие объекта `AndroidJS` не означает, что приложение экспортирует сетевой API для SSDP. Ручной запуск SSDP в кандидате требует поддерживаемого UDP API. Адрес MediaServer вводится вручную, а внешний Renderer можно указать по URL XML-описания. Локальные HTTP-запросы также могут ограничиваться CORS, mixed content и настройками приложения.
 
 Подробности: [docs/architecture.md](docs/architecture.md).
 
