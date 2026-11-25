@@ -1,4 +1,92 @@
+# 1.0.2-rc.1 — Xiaomi Mi TV Stick test results
+
+- Integrate the supplied Renderer/SSDP changes on top of the 0.6.8 ObjectID fix. Preserve server management, SOAP Browse, DIDL-Lite, catalog navigation and Android Recovery.
+- Default to local Lampa playback. Restore the persisted Renderer at startup only when Renderer output is selected. Keep Renderer HTTP requests independent of the catalog request.
+- Cover the supplied legacy GUARD keys. Retry incomplete settings in the existing instance, and avoid repeating insertions with an uncertain outcome.
+- Bound SSDP UDP startup and collection, including stalled native promises and socket callbacks. Bound the XML description phase and ignore late responses.
+- Automated suite 458/458, Node.js syntax and Acorn ES5.
+- Published the release candidate at [v102-rc1/plugin.js](https://nosferato497-ship-it.github.io/dlna-plugin/v102-rc1/plugin.js) (Git blob SHA `feb6cf7f544aec891e012b88db3ea9bfcaa19d48`).
+- Manual testing on 2026-11-25 with Xiaomi Mi TV Stick, Lampa and Netcraze Ultra MiniDLNA: 16 PASS, as reported by the user. Long playback duration was not independently measured. SSDP was BLOCKED because UDP API availability was unconfirmed and the plugin displayed the expected limitation message. Pagination above 200 items, MP4, external MediaRenderer, MEmu and Mi Box S remain untested for this candidate. See the [test protocol](docs/manual-test-1.0.2-rc.md).
+
+## Supplied development milestones
+
+- **0.7.0** — correct the syntax error in the supplied 0.6.0 source and add AVTransport verification.
+- **0.8.0** — discover devices over an available SSDP/UDP transport.
+- **0.9.0** — maintain a Renderer registry and select/persist the active device.
+- **1.0.0** — add Renderer playback, polling and remote transport controls.
+- **1.0.1** — refine Renderer session ownership and polling. Node parses the file, but execution stops at an undeclared `initialGuard`.
+- **1.0.2** — fix clean startup, revise the shared instance guard and UDP calls, and gate Renderer restoration on the selected output.
+
+# 0.6.8 — accepted on MEmu and Xiaomi
+
+- Persist server addresses: save without duplicates, choose active server, confirm deletion without changing active address.
+- Invalidate catalog cache/path/focus and stale generations on address change, including A -> B -> A. Preserve manual input, server check and Android lock.
+- Preserve test.2 input behavior; record observed MEmu return to DLNA panel and regression model limits.
+- MEmu and required Xiaomi Mi Box S 4K physical-remote acceptance: PASS, confirmed by the user on 2026-11-13. Installation/restart, server checks and persistence, duplicate suppression, second address, unavailable-server error, catalog isolation, return to working server, deletion preserving the active address, both Back transitions/focus, Android-player return and explicit selection/OK for B confirmed. Home → Lampa is optional and was not tested. Expanded scenarios and automated-only coverage are bounded in docs/xiaomi-acceptance-0.6.8.md.
+- Published unchanged verified artifact at v068/plugin.js; deployment commit 76df579434443263454f3f9963982513e3a17865. HTTP 200, JavaScript MIME and SHA-256 verified after deployment.
+
 # Changelog
+## 0.6.7 — accepted on MEmu and Xiaomi
+
+- Add Check DLNA server using one root Browse entry, reporting total entries or a read error without opening the catalog.
+- Suppress duplicate checks while pending and notifications for a changed address; allow checks after completion.
+- Add targeted retry and stale-address success/failure tests; preserve manual address entry and playback/navigation behavior.
+- Full suite: 441/441 PASS; node syntax and git diff --check PASS. MEmu and required Xiaomi physical-remote acceptance passed, including restart/version confirmation. Home return remains optional; concurrent-input/address-change protection has automated coverage only.
+
+## 0.6.5 — Android return permission (2026-11-07)
+
+- Published for limited Xiaomi testing, with manual device verification pending.
+- Allow a subsequent separate selection after matching external, a full hidden/visible cycle, document focus and ownership of the original folder in the same catalog instance.
+- Invalidate the cycle on folder/Activity changes and UI coverage. Keep manual recovery available.
+- Require fresh input, rejecting residual keyup, held OK and stale clicks. Allow resource selection after permission through OK and pointer.
+- Record auto-return-unconfirmed abandonment. Preserve the late native p2 → p1 launch risk and accepted Home-return behavior.
+- Validate 435 tests against the release copy, Node syntax, Acorn 8.18.0 ES5 and version-normalized source equality.
+
+## 0.6.4 — Return diagnostics
+
+- Add bounded observation of visibility, document focus, controller ownership and catalog/folder generations around Android playback.
+- Keep playback lock and manual recovery rules during observation.
+
+## 0.6.3 — Catalog Back and Android recovery
+
+- Return from catalog root to DLNA Bridge settings after leaving the catalog Activity. Preserve nested-folder and resource Back navigation.
+- Restore usability when backward produces no transition, subject to catalog ownership.
+- Preserve explicit recovery confirmation and a separate subsequent video selection.
+- Limited Xiaomi observations confirmed root/nested Back, repeated catalog/settings cycles and recovery behavior. See docs/architecture.md for evidence boundaries.
+
+## 0.6.0–0.6.2 — Component UI and lifecycle development
+
+- Introduce a catalog Activity and playback ownership independent of component lifetime.
+- Add Android pending-launch protection, recovery, lifecycle diagnostics and regression coverage.
+- Share the lampa_dlna_bridge_060 GUARD across the 0.6.x copies.
+
+## 0.5.9 — Multiple DLNA resources
+
+- Preserve every distinct valid HTTP(S) `res` resource and its available protocol, MIME, size, duration, resolution, and bitrate metadata.
+- Open the native Lampa Select menu only when an item has multiple resources; play a single resource directly and retain legacy URL fallback.
+- Show the resource count in the catalog row of a multi-resource item instead of the metadata of only one resource.
+- Skip auxiliary `res` entries (`image/*`, `text/*`, subtitle MIME types such as MiniDLNA captions and `JPEG_TN` thumbnails) so they are never offered as playable resources; legacy `url`/`mime`/`size`/`duration` fields now describe the first playable resource.
+- Add resource parsing, validation, selection, Back, and playback regression tests.
+
+## 0.5.8 — Network reliability
+
+- Guard native request completion so success or error is delivered no more than once, including synchronous transport exceptions and cleanup failures.
+- Ignore stale Browse responses after DLNA navigation, closing the catalog, or leaving its Lampa Settings component.
+- Validate `TotalMatches` on every page and reject changing counts or incomplete results without caching them.
+- Keep the 200-item page size, 5000-item safety cap, SOAP request format, and direct player URL handoff.
+- Add network reliability and Settings lifecycle regression tests.
+
+## 0.5.7 — AndroidJS API inspection
+
+- Extend the read-only AndroidJS diagnostics with metadata and bounded function source for `httpReq`, `get`, `getResp`, and `dump`; the methods are never invoked.
+- Report missing methods and accessor properties without reading them. No network or UDP probes are performed.
+
+## 0.5.6 — Android bridge diagnostics
+
+- Verify registration outcomes through SettingsApi getters, keep uncertain steps from duplicating entries, isolate optional AndroidJS registration, and use the correct 0.5.6 component label.
+- Added a Lampa settings action to inspect only the known Android bridge globals.
+- Report property and method types plus bounded prototype information without invoking bridge methods or reading accessor properties.
+- Added bounded diagnostics with exception handling; no network or UDP probes are performed.
 
 ## 0.5.5 — Restore DLNA settings focus after playback
 
