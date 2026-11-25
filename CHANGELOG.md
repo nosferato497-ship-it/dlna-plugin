@@ -1,10 +1,12 @@
-# 1.0.2-rc.1 — Android TV acceptance pending
+# 1.0.2-rc.1 — Xiaomi Mi TV Stick test results
 
 - Integrate the supplied Renderer/SSDP changes on top of the 0.6.8 ObjectID fix. Preserve server management, SOAP Browse, DIDL-Lite, catalog navigation and Android Recovery.
 - Default to local Lampa playback. Restore the persisted Renderer at startup only when Renderer output is selected. Keep Renderer HTTP requests independent of the catalog request.
 - Cover the supplied legacy GUARD keys. Retry incomplete settings in the existing instance, and avoid repeating insertions with an uncertain outcome.
 - Bound SSDP UDP startup and collection, including stalled native promises and socket callbacks. Bound the XML description phase and ignore late responses.
-- Automated suite 458/458, Node.js syntax and Acorn ES5. MEmu and physical Android TV acceptance pending.
+- Automated suite 458/458, Node.js syntax and Acorn ES5.
+- Published the release candidate at [v102-rc1/plugin.js](https://nosferato497-ship-it.github.io/dlna-plugin/v102-rc1/plugin.js) (Git blob SHA `feb6cf7f544aec891e012b88db3ea9bfcaa19d48`).
+- Manual testing on 2026-11-25 with Xiaomi Mi TV Stick, Lampa and Netcraze Ultra MiniDLNA: 16 PASS, as reported by the user. Long playback duration was not independently measured. SSDP was BLOCKED because UDP API availability was unconfirmed and the plugin displayed the expected limitation message. Pagination above 200 items, MP4, external MediaRenderer, MEmu and Mi Box S remain untested for this candidate. See the [test protocol](docs/manual-test-1.0.2-rc.md).
 
 ## Supplied development milestones
 

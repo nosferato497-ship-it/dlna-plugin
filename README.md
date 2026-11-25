@@ -5,10 +5,12 @@
 Внешний UPnP Renderer — дополнительный сценарий. В настройках DLNA Bridge можно указать URL XML-описания, проверить AVTransport, выбрать устройство и переключить назначение воспроизведения. SSDP запускается вручную и требует доступного UDP API. С сохранённым URL Renderer локальный режим при запуске не обращается к устройству.
 
 - Автопроверки — 458/458, синтаксис Node.js и Acorn ES5.
-- MEmu и обязательная приёмка на Xiaomi Mi Box S 4K с физическим пультом — ожидаются.
+- Ручной прогон 25.11.2026 на Xiaomi Mi TV Stick, Lampa и Netcraze Ultra MiniDLNA — **16 PASS** по подтверждениям пользователя. Длительное воспроизведение подтверждено без независимого замера времени.
+- SSDP — **BLOCKED**: UDP API не подтверждён, сообщение об ограничении показано корректно. Пагинация свыше 200 элементов, MP4, внешний MediaRenderer, MEmu и Xiaomi Mi Box S для кандидата остаются непроверенными.
+- Опубликованная сборка кандидата — [v102-rc1/plugin.js](https://nosferato497-ship-it.github.io/dlna-plugin/v102-rc1/plugin.js), Git blob SHA `feb6cf7f544aec891e012b88db3ea9bfcaa19d48`.
 - Исходник кандидата — [plugin.js](plugin.js). Проверенная сборка 0.6.8 и её протоколы приведены ниже.
 
-[Протокол приёмки](docs/manual-test-1.0.2-rc.md) | [Этапы и архитектура](docs/architecture.md) | [История изменений](CHANGELOG.md) | [Сопоставление исходников](docs/source-audit-1.0.2.md).
+[Протокол приёмки](docs/manual-test-1.0.2-rc.md) | [Матрица совместимости](docs/compatibility.md) | [Этапы и архитектура](docs/architecture.md) | [История изменений](CHANGELOG.md) | [Сопоставление исходников](docs/source-audit-1.0.2.md).
 
 ---
 
